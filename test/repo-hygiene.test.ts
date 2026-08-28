@@ -62,7 +62,10 @@ describe('repository hygiene', () => {
   });
 
   it('tracks the docs a fresh session needs to reconstruct context', () => {
-    for (const doc of ['README.md', 'docs/DECISIONS.md', 'docs/STATUS.md']) {
+    for (const doc of [
+      'README.md', 'CLAUDE.md',
+      'docs/DECISIONS.md', 'docs/STATUS.md', 'docs/SPEC.md',
+    ]) {
       expect(tracked.has(doc), `${doc} is not tracked`).toBe(true);
     }
   });

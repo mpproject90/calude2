@@ -11,13 +11,17 @@ addresses, and the bot only decides *when* to enter and exit within them.
 > **Status: phase 1, steps 1–5 of 10. Nothing here can place a trade.**
 > There is no execution layer and no code path submits a transaction.
 > No backtest has run, so no result about profitability exists.
+>
+> **Step 6 is blocked** on a local data-layer review — see `docs/STATUS.md`.
 
 ## Read these first
 
 | File | What it is |
 |---|---|
-| **`docs/DECISIONS.md`** | Every design decision and why. Read this before changing anything. |
-| **`docs/STATUS.md`** | What is built, what is outstanding, what is unverified, what is next. |
+| **`CLAUDE.md`** | Entry point: hard rules and the current stop condition. |
+| **`docs/STATUS.md`** | **The handoff.** What is built, outstanding, unverified; what happens next. |
+| **`docs/DECISIONS.md`** | Every design decision and why. Read before changing anything. |
+| **`docs/SPEC.md`** | The original requirements. Where code diverges, DECISIONS is authoritative. |
 
 ## Setup from a clean clone
 
@@ -33,7 +37,7 @@ npm run config:check -- config/default.yaml
 npm test
 ```
 
-Expected: `config/default.yaml is valid`, and 174 test cases passing across 8
+Expected: `config/default.yaml is valid`, and 183 test cases passing across 9
 files. Nothing above needs network access beyond the npm registry.
 
 ### Scripts
@@ -96,6 +100,8 @@ so this review is also how its parsing gets verified. Send back
 
 ```
 config/default.yaml   strategy + risk configuration (mode: backtest)
+CLAUDE.md             entry point for a fresh session
+docs/SPEC.md          original requirements
 docs/DECISIONS.md     design decisions and their reasoning
 docs/STATUS.md        build state, blockers, what is unverified
 src/cli/              config:check and data:fetch entry points

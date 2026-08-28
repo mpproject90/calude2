@@ -1,9 +1,16 @@
 # Design decisions
 
-A running log of every significant decision and the reasoning behind it. If you
-are picking this project up with no conversation history, **read this file
-first** — it explains why the code looks the way it does. `docs/STATUS.md` tells
-you what is built and what is next.
+A running log of every significant decision and the reasoning behind it. It
+explains why the code looks the way it does.
+
+**Document map** — the four files a fresh session needs, in reading order:
+
+| File | Purpose |
+|---|---|
+| `CLAUDE.md` | Entry point. Hard rules and the current stop condition. |
+| `docs/STATUS.md` | **The handoff.** What is built, outstanding, unverified; what happens next. |
+| `docs/DECISIONS.md` | This file. Why things are the way they are. |
+| `docs/SPEC.md` | The original requirements. Where code diverges, **this file is authoritative**. |
 
 Decisions are appended, not rewritten. If one is reversed, the entry stays and a
 new entry records the reversal and why.
@@ -330,7 +337,30 @@ commits, so no `main` existed and GitHub made the first pushed branch the
 default — a conversation-specific name is a fragile thing for a fresh session to
 depend on.
 
-## 16. Development environment constraint
+## 16. The spec and the handoff live in the repo, not in a conversation
+
+**Decision:** commit the original build spec as `docs/SPEC.md`, add `CLAUDE.md`
+as an entry point, and make `docs/STATUS.md` a self-contained handoff.
+
+**Why:** the project is built in an ephemeral container, and the operator may
+resume from a completely fresh session days later with no conversation history.
+`DECISIONS.md` records *decisions*, but a fresh session also needs the *original
+requirements* — the dashboard spec, the full metrics list, the "what not to do"
+rules, the phase gates. None of that was reconstructible from the code.
+
+`CLAUDE.md` exists because documentation only helps if it is read: a fresh Claude
+Code session loads it automatically, so it carries the pointers to the other
+three files and the current stop condition.
+
+`SPEC.md` opens with a divergence table, because the code deliberately departs
+from the original brief in six places (Tier B deferred, ATR-derived expected
+move, the relative-strength rename, SOL-quoted synthesis, intrabar stops, exit
+priority). Where they conflict, DECISIONS wins and SPEC says so.
+
+**Standing rule:** anything a fresh session would need and could not reconstruct
+from the code belongs in the repo, committed, before the session ends.
+
+## 17. Development environment constraint
 
 The cloud container this was built in blocks all market-data hosts by egress
 policy (`api.binance.com`, `api.geckoterminal.com`, `public-api.birdeye.so`, and
