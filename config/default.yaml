@@ -1,0 +1,73 @@
+# Default configuration. Mode is deliberately `backtest` — spec §2.3 requires
+# every config file to default to a non-trading mode. Live also needs
+# LIVE_TRADING=true in the environment before it will arm.
+
+global:
+  mode: backtest
+  maxConcurrentPositions: 3
+  dailyLossLimitPct: 10
+  maxDeployedCapitalPct: 50
+  maxAllocationPerTokenPct: 20
+  indicatorWarmupMultiplier: 7      # period * 7 candles before any value is emitted
+  minTradesForConclusion: 50
+
+  regimeFilter:
+    enabled: true
+    solMaPeriod: 50
+    solMaTimeframe: 4h
+
+  costFloor:
+    dexFeePct: 0.25
+    priorityFeeSol: "0.0005"
+    jitoTipSol: "0.0001"
+    minTargetToCostRatio: 3         # target move must beat round-trip cost 3x
+    fallbackSlippagePct: 1          # used when historical pool liquidity is absent
+
+tiers:
+  A:
+    minLiquidityUsd: 250000
+    minVolume24hUsd: 500000
+    minAgeDays: 30
+  B:
+    minLiquidityUsd: 100000
+    minVolume24hUsd: 250000
+    minAgeDays: 7
+    maxLpDeclinePct: 10
+    lpTrendWindowMinutes: 20
+    requireMintAuthorityRevoked: true
+    requireFreezeAuthorityRevoked: true
+    requireLpBurnedOrLocked: true
+    maxTop10HolderPct: 30
+    minPriorCycles: 1
+    recheckIntervalMinutes: 5
+
+tokens:
+  - address: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+    symbol: JUP
+    tier: A
+    timeframe: 1h
+    buyAmountSol: "0.5"
+    rsi:
+      period: 14
+      oversold: 30
+      overbought: 70
+    mfi:
+      period: 14
+      threshold: 30
+    entry:
+      priorOverboughtWithinCandles: 50
+      requireDivergence: false
+      relativeStrengthThreshold: 0.05
+      relativeStrengthLookback: 24
+    exit:
+      stopLossPct: 15
+      timeExitCandles: 48
+      rsiExitLevel: 70
+      trailingStop:
+        enabled: false
+        activateAtPct: 20
+        trailPct: 10
+    limits:
+      maxPctOfPoolLiquidity: 0.5
+      cooldownCandlesAfterLoss: 24
+      minViableBuyAmountSol: "0.05"
