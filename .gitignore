@@ -8,18 +8,21 @@ wallet.json
 keypair.json
 
 # Runtime data
-data/
+# Leading slashes matter: a bare `data/` also matches src/data/, which silently
+# excluded the entire data layer from the repo until a clean-clone test caught
+# it. Anchor anything that is only meant to exist at the repo root.
+/data/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
-logs/
+/logs/
 *.log
 
 # Build / deps
 node_modules/
-dist/
-coverage/
+/dist/
+/coverage/
 .tsbuildinfo
 
 # OS / editor
