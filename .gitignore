@@ -1,4 +1,6 @@
-# Secrets — never commit
+# Secrets — never commit.
+# These are deliberately UNANCHORED: a secret nested anywhere is still a secret,
+# so matching at any depth is the desired behaviour here.
 .env
 .env.*
 !.env.example
@@ -18,6 +20,13 @@ keypair.json
 *.db-shm
 /logs/
 *.log
+
+# *.db and *.log above match at ANY depth, which would silently swallow a
+# committed test fixture — the same failure mode as the `data/` bug. Test
+# fixtures are explicitly re-included. (Secrets are NOT re-included: the
+# patterns above still win for .env, keys and wallets under test/.)
+!test/fixtures/*.db
+!test/fixtures/*.log
 
 # Build / deps
 node_modules/

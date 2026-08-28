@@ -309,10 +309,26 @@ the documented setup: `npm test` could not resolve `../src/data/validate.js` and
 `/data/`, `/logs/`, `/dist/`, `/coverage/`. `node_modules/` stays unanchored
 because nested copies are legitimate.
 
+**A later audit found two more depth-matching patterns worth fixing.** `*.db`
+and `*.log` also match at any depth, which would silently swallow a committed
+test fixture — the same failure mode. Both are now re-included for
+`test/fixtures/`. The secret patterns (`.env`, `*.pem`, `*.key`, `wallet.json`,
+`keypair.json`) are left deliberately unanchored: a secret nested anywhere is
+still a secret, so matching at any depth is the behaviour we want, and the
+negations do not re-include them.
+
 **Standing rule:** "pushed" is not the same as "in the repo". After a push that
-adds files, verify by cloning the branch fresh and running the documented setup
-end to end. A successful `git push` proves a commit was transferred, not that it
-contained what you think it did.
+adds files, run **both** a clean clone (catches anything whose absence breaks an
+import) and a tree-versus-index diff (catches a doc, a config example, or a
+module nothing imports yet). `test/repo-hygiene.test.ts` automates most of this
+and runs with the suite — it asserts that nothing under `src/` or `test/` is
+ignored, that the docs and reference fixtures are tracked, and that secrets stay
+ignored at every depth.
+
+**Branching:** `main` is the working branch. The repository was created with zero
+commits, so no `main` existed and GitHub made the first pushed branch the
+default — a conversation-specific name is a fragile thing for a fresh session to
+depend on.
 
 ## 16. Development environment constraint
 

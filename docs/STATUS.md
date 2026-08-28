@@ -4,8 +4,11 @@ Updated as the last action of every completed step. Read `docs/DECISIONS.md`
 first for *why*; this file is *what*.
 
 **Last updated:** phase 1, end of step 2 (data layer + intrabar stops), plus
-docs and the `.gitignore` fix. Verified by clean clone: 174 cases pass from a
-fresh checkout.
+docs, the `.gitignore` fixes, the repo-hygiene test, and the merge to `main`.
+Verified by clean clone and tree-versus-index diff: 183 cases pass from a fresh
+checkout.
+
+**`main` is the working branch.** Clone it and you have everything.
 
 ---
 
@@ -31,7 +34,7 @@ Steps 3–5 were built before step 2 — the operator's instruction skipped it b
 mistake, and it was filled in afterwards. Nothing depends on the order, because
 everything above the data layer operates on `Candle[]`.
 
-**174 test cases across 8 files. Typecheck clean** (`strict`, `noImplicitAny`,
+**183 test cases across 9 files. Typecheck clean** (`strict`, `noImplicitAny`,
 `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`).
 
 ## BLOCKED: step 6 waits on a real-data review
@@ -118,11 +121,24 @@ Carried forward from the spec and from decisions made since:
 - Push **before** answering any operator question.
 - If mid-step and the operator goes quiet, commit work-in-progress to a branch.
 - Update this file as the **last action of every step**.
-- After a push that adds files, **verify with a clean clone** — clone the branch
-  into an empty directory and run the documented setup end to end. A successful
-  `git push` proves a commit was transferred, not that it contained what you
-  think it did. This is not hypothetical: a `.gitignore` pattern silently
-  excluded the entire data layer from three consecutive pushes (DECISIONS §15).
+- After a push that adds files, run **both** checks — they catch different
+  things, and a successful `git push` proves a commit was transferred, not that
+  it contained what you think it did (DECISIONS §15):
+  1. **Clean clone.** Clone the branch into an empty directory and run the
+     documented setup end to end. Catches anything whose absence breaks a build
+     or an import.
+  2. **Tree-versus-index diff.** Compare every file on disk against
+     `git ls-files`, and confirm each difference is *intentionally* ignored.
+     Catches what a clean clone cannot: a doc, a config example, or a module
+     nothing imports yet.
+     ```bash
+     find . -type f -not -path './.git/*' -not -path './node_modules/*' \
+       | sed 's|^\./||' | sort > /tmp/tree.txt
+     git ls-files | sort > /tmp/index.txt
+     comm -23 /tmp/tree.txt /tmp/index.txt   # on disk, not tracked
+     comm -13 /tmp/tree.txt /tmp/index.txt   # tracked, missing from disk
+     ```
+  `test/repo-hygiene.test.ts` automates most of this and runs with the suite.
 - Never present backtest results without trade count, the out-of-sample split,
   and total costs paid. Report numbers and limitations; let the operator draw
   the conclusion.
