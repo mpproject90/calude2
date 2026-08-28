@@ -57,7 +57,7 @@ tokens:
     entry:
       priorOverboughtWithinCandles: 50
       requireDivergence: false
-      relativeStrengthThreshold: 0.05
+      minUnderperformanceVsSol: 0.05
       relativeStrengthLookback: 24
     exit:
       stopLossPct: 15

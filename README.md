@@ -4,9 +4,9 @@ A mean-reversion trading bot for liquid Solana tokens and manually vetted
 memecoins. Buys oversold conditions confirmed by RSI and MFI; exits on momentum
 recovery, hard stop-loss, or time.
 
-**Status: Phase 1, step 1 of 10.** Scaffold, config validation and persistence
-are in place. No strategy code, no data layer, no execution. Nothing here can
-place a trade.
+**Status: Phase 1, steps 1 and 3–5 of 10.** Config, persistence, indicators,
+filters and the rules engine are in place and unit-tested. No data layer yet, no
+backtest, no execution. Nothing here can place a trade.
 
 ## What this is not
 
@@ -28,10 +28,10 @@ interactive confirmation at startup. Every config file defaults to `backtest`.
 ## Build order progress
 
 - [x] 1. Scaffold, config schema + validation, SQLite, `.gitignore` with `.env`
-- [ ] 2. Data layer — provider research, interface, caching, gap detection
-- [ ] 3. Indicator engine with warm-up gating and reference-value tests
-- [ ] 4. Filter stack, each filter independently tested
-- [ ] 5. Rules engine (entry/exit) against synthetic candle series
+- [ ] 2. Data layer — Binance provider, caching, gap detection, JUP/SOL synthesis
+- [x] 3. Indicator engine with warm-up gating and reference-value tests
+- [x] 4. Filter stack, each filter independently tested
+- [x] 5. Rules engine (entry/exit) against synthetic candle series
 - [ ] 6. Backtest engine with realistic cost modelling
 - [ ] 7. **Stop — report results, await review**
 - [ ] 8. Paper trading
@@ -60,6 +60,33 @@ src/util/amount.ts    integer (bigint) token math — no floats on-chain
 src/util/logger.ts    structured logging with secret redaction
 test/                 unit tests
 ```
+
+## Decisions made during the build
+
+**Tier B is deferred and will not be built.** Honest Tier B backtesting needs a
+survivorship-bias-free memecoin dataset including tokens that went to zero, which
+is not obtainable from free data sources. A tier that cannot be validated will
+not be traded. `TierBSafetyProvider` defines the interface; every method throws
+`NotImplementedError`, and a `tier: B` token is rejected at config load.
+
+**The expected move is derived, not hand-set.** The cost-floor gate (§6.3) needs
+a target to compare against round-trip cost, but the exit rules define no fixed
+take-profit. Rather than gate real trades on a guessed constant, the expected
+move is `atrMultiplier * ATR(14) / price` — volatility-scaled, per token and
+timeframe. This is a bootstrap: after phase 1 the median Maximum Favorable
+Excursion per token replaces it.
+
+**Relative strength ignores beta, deliberately.** The filter tests
+`tokenReturn - solReturn <= -minUnderperformanceVsSol` in raw percentage points.
+A token that habitually moves ~1.4x SOL will show underperformance on any SOL
+drawdown purely from beta. The simple version is transparent and testable; token
+and SOL returns are logged separately so beta can be estimated from backtest data
+and the filter revisited if discrimination proves poor.
+
+**Strategy runs on the SOL-quoted series.** P&L is in SOL, so the series that
+matters is JUP/SOL, not JUP/USDT. It is synthesized as (JUP/USDT) ÷ (SOL/USDT).
+Close is exact so RSI is exact; synthesized high/low are approximations, so MFI
+on a synthesized series is approximate and is treated as confirmation only.
 
 ## Design rules enforced in code
 

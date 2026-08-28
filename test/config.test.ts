@@ -26,7 +26,7 @@ describe('config validation', () => {
     expect(cfg.global.maxConcurrentPositions).toBe(3);
     expect(cfg.global.indicatorWarmupMultiplier).toBe(7);
     expect(cfg.tokens[0]!.exit.stopLossPct).toBe(15);
-    expect(cfg.tokens[0]!.entry.relativeStrengthThreshold).toBe(0.05);
+    expect(cfg.tokens[0]!.entry.minUnderperformanceVsSol).toBe(0.05);
   });
 
   it('normalises buyAmountSol to an exact decimal string', () => {
