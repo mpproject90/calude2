@@ -33,7 +33,7 @@ npm run config:check -- config/default.yaml
 npm test
 ```
 
-Expected: `config/default.yaml is valid`, and 173 test cases passing across 8
+Expected: `config/default.yaml is valid`, and 174 test cases passing across 8
 files. Nothing above needs network access beyond the npm registry.
 
 ### Scripts

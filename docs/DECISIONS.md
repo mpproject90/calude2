@@ -291,7 +291,30 @@ JUP/SOL synthesis depend on.
 an injected mock — pagination, throttling, 429 backoff and row parsing are
 verified against a *model* of the API, not the API. See `docs/STATUS.md`.
 
-## 15. Development environment constraint
+## 15. `.gitignore` patterns are anchored, and pushes are verified by clean clone
+
+**Bug found by clean-clone testing, not by any test or review.** A bare `data/`
+pattern in `.gitignore` matches a directory named `data` at **any depth**, so it
+also matched `src/data/`. The entire data layer — `validate.ts`, `gaps.ts`,
+`repository.ts`, `synthesize.ts`, `index.ts`, `providers/binance.ts` — was never
+committed. `git add -A` skipped it silently, the local working tree looked
+correct, and three consecutive pushes reported success while the repo did not
+contain the code.
+
+It surfaced only on cloning the pushed branch into a clean directory and running
+the documented setup: `npm test` could not resolve `../src/data/validate.js` and
+`tsc` reported four missing modules.
+
+**Decision:** anchor every root-only ignore pattern with a leading slash —
+`/data/`, `/logs/`, `/dist/`, `/coverage/`. `node_modules/` stays unanchored
+because nested copies are legitimate.
+
+**Standing rule:** "pushed" is not the same as "in the repo". After a push that
+adds files, verify by cloning the branch fresh and running the documented setup
+end to end. A successful `git push` proves a commit was transferred, not that it
+contained what you think it did.
+
+## 16. Development environment constraint
 
 The cloud container this was built in blocks all market-data hosts by egress
 policy (`api.binance.com`, `api.geckoterminal.com`, `public-api.birdeye.so`, and

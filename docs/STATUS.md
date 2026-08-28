@@ -3,7 +3,9 @@
 Updated as the last action of every completed step. Read `docs/DECISIONS.md`
 first for *why*; this file is *what*.
 
-**Last updated:** phase 1, end of step 2 (data layer + intrabar stops).
+**Last updated:** phase 1, end of step 2 (data layer + intrabar stops), plus
+docs and the `.gitignore` fix. Verified by clean clone: 174 cases pass from a
+fresh checkout.
 
 ---
 
@@ -29,7 +31,7 @@ Steps 3–5 were built before step 2 — the operator's instruction skipped it b
 mistake, and it was filled in afterwards. Nothing depends on the order, because
 everything above the data layer operates on `Candle[]`.
 
-**173 test cases across 8 files. Typecheck clean** (`strict`, `noImplicitAny`,
+**174 test cases across 8 files. Typecheck clean** (`strict`, `noImplicitAny`,
 `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`).
 
 ## BLOCKED: step 6 waits on a real-data review
@@ -116,6 +118,11 @@ Carried forward from the spec and from decisions made since:
 - Push **before** answering any operator question.
 - If mid-step and the operator goes quiet, commit work-in-progress to a branch.
 - Update this file as the **last action of every step**.
+- After a push that adds files, **verify with a clean clone** — clone the branch
+  into an empty directory and run the documented setup end to end. A successful
+  `git push` proves a commit was transferred, not that it contained what you
+  think it did. This is not hypothetical: a `.gitignore` pattern silently
+  excluded the entire data layer from three consecutive pushes (DECISIONS §15).
 - Never present backtest results without trade count, the out-of-sample split,
   and total costs paid. Report numbers and limitations; let the operator draw
   the conclusion.
