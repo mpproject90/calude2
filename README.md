@@ -1,21 +1,129 @@
 # Solana RSI/MFI Mean-Reversion Bot
 
-A mean-reversion trading bot for liquid Solana tokens and manually vetted
-memecoins. Buys oversold conditions confirmed by RSI and MFI; exits on momentum
-recovery, hard stop-loss, or time.
-
-**Status: Phase 1, steps 1–5 of 10 complete.** Config, persistence, data layer,
-indicators, filters and the rules engine are in place and unit-tested (173 test
-cases). No backtest yet, no execution. Nothing here can place a trade.
-
-Next: review the data layer against real candles (`npm run data:fetch`), then
-step 6, the backtest engine.
-
-## What this is not
+A mean-reversion trading bot for liquid Solana tokens. It buys oversold
+conditions confirmed by RSI and MFI, and exits on momentum recovery, a hard
+stop-loss, or time.
 
 Not a sniper, not a copy-trading bot, not an MEV bot. Speed is not the edge —
-discipline and filtering are. Token selection is manual; the bot only decides
-*when* to enter and exit within tokens you have vetted and pasted in.
+discipline and filtering are. Token selection is manual: you paste contract
+addresses, and the bot only decides *when* to enter and exit within them.
+
+> **Status: phase 1, steps 1–5 of 10. Nothing here can place a trade.**
+> There is no execution layer and no code path submits a transaction.
+> No backtest has run, so no result about profitability exists.
+
+## Read these first
+
+| File | What it is |
+|---|---|
+| **`docs/DECISIONS.md`** | Every design decision and why. Read this before changing anything. |
+| **`docs/STATUS.md`** | What is built, what is outstanding, what is unverified, what is next. |
+
+## Setup from a clean clone
+
+Requires **Node 20+**.
+
+```bash
+git clone https://github.com/mpproject90/calude2
+cd calude2
+npm install
+
+cp .env.example .env      # .env is gitignored and must stay that way
+npm run config:check -- config/default.yaml
+npm test
+```
+
+Expected: `config/default.yaml is valid`, and 173 test cases passing across 8
+files. Nothing above needs network access beyond the npm registry.
+
+### Scripts
+
+```bash
+npm test                  # run the suite
+npm run test:watch        # watch mode
+npm run typecheck         # tsc --noEmit
+npm run build             # compile to dist/
+npm run config:check -- config/default.yaml
+npm run data:fetch -- --symbol JUP --interval 1h --days 90
+```
+
+## Configuration
+
+`config/default.yaml` holds strategy and risk settings, validated against a zod
+schema on load. Invalid config is rejected loudly at startup with **every**
+problem listed, not just the first.
+
+`mode` defaults to `backtest`. Live trading additionally requires
+`LIVE_TRADING=true` — exactly that string — in the environment; config alone can
+never arm real swaps.
+
+Secrets live in `.env` only, never in config, never in logs, never committed.
+
+## Reviewing the data layer against real candles
+
+This is the current step. It needs outbound access to `api.binance.com` and no
+API key. **It will not run inside a sandboxed environment that blocks that
+host** — run it on your own machine.
+
+```bash
+npm run data:fetch -- --symbol JUP --interval 1h --days 90
+npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db
+```
+
+Pulls `<SYMBOL>USDT` and `SOLUSDT`, caches both in SQLite, synthesizes
+`<SYMBOL>/SOL`, and reports coverage, gaps, rejections and range widening. It
+also writes `data/raw-sample.json` — verbatim response rows plus this build's
+parse of row 0.
+
+What to scrutinise:
+
+- **Bar coverage %** — well below 100% means Binance history is thinner than
+  expected for that pair.
+- **Gap count** — should be near zero for a CEX. Anything substantial means the
+  interval-alignment assumption is wrong.
+- **Rejected candles** — should be zero. Non-zero means real data violates an
+  invariant asserted in `src/data/validate.ts`.
+- **Range widening** — how much wider the synthesized high/low is than
+  `|close − open|`. If it is large, MFI on the synthesized series is distorted.
+  **Build the 1m-aggregated path before concluding anything about MFI** — exhaust
+  the data-quality fix before changing the strategy's shape.
+
+The Binance provider has **never made a real request** (every test uses a mock),
+so this review is also how its parsing gets verified. Send back
+`data/raw-sample.json` if anything looks wrong.
+
+## Layout
+
+```
+config/default.yaml   strategy + risk configuration (mode: backtest)
+docs/DECISIONS.md     design decisions and their reasoning
+docs/STATUS.md        build state, blockers, what is unverified
+src/cli/              config:check and data:fetch entry points
+src/config/           zod schema, loader, live-trading gate
+src/data/             provider, cache, validation, gap detection, synthesis
+src/db/               SQLite schema and connection
+src/filters/          the filter stack
+src/indicators/       RSI, MFI, ATR with warm-up gating
+src/rules/            entry, exit and portfolio limits
+src/types/            Candle, Interval, IndicatorValue, CandleProvider
+src/util/amount.ts    integer (bigint) token math — no floats on-chain
+src/util/logger.ts    structured logging with secret redaction
+test/fixtures/        cross-language indicator reference values (committed)
+```
+
+## Invariants enforced in code
+
+- **No position without an exit path.** `positions` requires `stop_loss_price`
+  and `time_exit_candle_ts` as `NOT NULL` at insert.
+- **Fail closed.** Indicators return `{ value, reliable, reason }`, never a bare
+  number; the rules engine refuses `reliable: false` with no override. Missing
+  data blocks trading rather than proceeding on assumption.
+- **No floats on-chain.** `TokenAmount` is `bigint` + decimals, parsed from
+  strings, stored as `TEXT`. Sizing truncates toward zero, never up.
+- **Stops are intrabar.** A 15% stop checked once an hour is not a 15% stop.
+- **Secrets never logged.** Every record passes a redactor.
+- **One strategy implementation** shared by backtest, paper and live. If they
+  could disagree, the backtest would be worthless.
 
 ## Build phases
 
@@ -25,119 +133,12 @@ discipline and filtering are. Token selection is manual; the bot only decides
 | 2 | Paper trading against live data, no transactions | Several weeks of results |
 | 3 | Live execution via Jupiter | Explicit approval only |
 
-Phase 3 additionally requires `LIVE_TRADING=true` in the environment *and* an
-interactive confirmation at startup. Every config file defaults to `backtest`.
-
-## Build order progress
-
-- [x] 1. Scaffold, config schema + validation, SQLite, `.gitignore` with `.env`
-- [x] 2. Data layer — Binance provider, caching, gap detection, JUP/SOL synthesis
-- [x] 3. Indicator engine with warm-up gating and reference-value tests
-- [x] 4. Filter stack, each filter independently tested
-- [x] 5. Rules engine (entry/exit) against synthetic candle series
-- [ ] 6. Backtest engine with realistic cost modelling  ← **next, after data review**
-- [ ] 7. **Stop — report results, await review**
-- [ ] 8. Paper trading
-- [ ] 9. **Stop — run for weeks, await review**
-- [ ] 10. Live execution (explicit approval only)
-
-## Setup
-
-```bash
-npm install
-cp .env.example .env      # fill in; .env is gitignored and must stay that way
-npm run config:check -- config/default.yaml
-npm test
-```
-
-### Reviewing the data layer against real candles
-
-```bash
-npm run data:fetch -- --symbol JUP --interval 1h --days 90
-npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db
-```
-
-Pulls `<SYMBOL>USDT` and `SOLUSDT` from Binance, caches both in SQLite,
-synthesizes `<SYMBOL>/SOL`, and reports bar coverage, gaps, rejected candles and
-how much the synthesis widened the intrabar range. Needs outbound access to
-`api.binance.com` — no API key. It will not run inside a sandboxed cloud
-environment that blocks that host; run it locally.
-
-Requires Node 20+.
-
-## Layout
-
-```
-config/default.yaml   strategy + risk configuration (mode: backtest)
-src/cli/              config:check and data:fetch entry points
-src/config/           zod schema, loader, live-trading gate
-src/data/             provider, cache, validation, gap detection, synthesis
-src/indicators/       RSI, MFI, ATR with warm-up gating
-src/filters/          the §6 filter stack
-src/rules/            entry, exit and portfolio limits
-src/db/               SQLite schema and connection
-src/types/            Candle, Interval, IndicatorValue, CandleProvider
-src/util/amount.ts    integer (bigint) token math — no floats on-chain
-src/util/logger.ts    structured logging with secret redaction
-test/                 unit tests
-```
-
-## Decisions made during the build
-
-**Tier B is deferred and will not be built.** Honest Tier B backtesting needs a
-survivorship-bias-free memecoin dataset including tokens that went to zero, which
-is not obtainable from free data sources. A tier that cannot be validated will
-not be traded. `TierBSafetyProvider` defines the interface; every method throws
-`NotImplementedError`, and a `tier: B` token is rejected at config load.
-
-**The expected move is derived, not hand-set.** The cost-floor gate (§6.3) needs
-a target to compare against round-trip cost, but the exit rules define no fixed
-take-profit. Rather than gate real trades on a guessed constant, the expected
-move is `atrMultiplier * ATR(14) / price` — volatility-scaled, per token and
-timeframe. This is a bootstrap: after phase 1 the median Maximum Favorable
-Excursion per token replaces it.
-
-**Relative strength ignores beta, deliberately.** The filter tests
-`tokenReturn - solReturn <= -minUnderperformanceVsSol` in raw percentage points.
-A token that habitually moves ~1.4x SOL will show underperformance on any SOL
-drawdown purely from beta. The simple version is transparent and testable; token
-and SOL returns are logged separately so beta can be estimated from backtest data
-and the filter revisited if discrimination proves poor.
-
-**Stops are evaluated intrabar, not on candle close.** A 15% stop checked once
-an hour is not a 15% stop. In the backtest, `bar.low <= stopPrice` means the
-position stopped out during that bar and fills at the stop less modelled
-slippage, never at the close. In live mode price is polled every
-`global.stopPollSeconds` (default 30s) independent of candle boundaries. The same
-applies to the trailing stop. Entry signals stay on candle close — never act on
-an incomplete candle. `intrabarStopBreach` is still reported so the cost of the
-old close-only behaviour remains measurable.
-
-**Exit priority is safety → stop-loss → trailing → RSI → time.** Time is last
-deliberately: if a trailing stop and a time exit both come due on the same bar
-the position is in profit, and trailing gives the better fill. Time is the
-"nothing happened" fallback.
-
-**Strategy runs on the SOL-quoted series.** P&L is in SOL, so the series that
-matters is JUP/SOL, not JUP/USDT. It is synthesized as (JUP/USDT) ÷ (SOL/USDT).
-Close is exact so RSI is exact; synthesized high/low are approximations, so MFI
-on a synthesized series is approximate and is treated as confirmation only.
-
-## Design rules enforced in code
-
-- **No position without an exit path.** `positions` rows require a stop-loss
-  price and a time-exit candle at insert; they are `NOT NULL` columns.
-- **Fail closed.** Indicators return `{ value, reliable }`, never a bare
-  number. The rules engine will refuse `reliable: false` with no override.
-- **No floats on-chain.** `TokenAmount` holds a raw `bigint` plus decimals.
-  Amounts are stored in SQLite as TEXT, never REAL.
-- **Secrets never logged.** Every log record passes through a redactor that
-  strips secret-shaped keys and key-length base58 strings.
-- **Config cannot arm live trading alone.** `assertLiveTradingAllowed` requires
-  `LIVE_TRADING` to be exactly `"true"`.
-
 ## Expected outcome
 
-The most likely result is that this strategy has thin or no edge. Phases 1 and 2
-exist to find that out cheaply. A clear negative answer, honestly measured, is a
-successful outcome for this project.
+The most likely result is that this strategy has thin or no edge. Retail
+mechanical mean-reversion frequently fails out-of-sample, and the failure is
+usually structural rather than a parameter problem. Phases 1 and 2 exist to find
+that out cheaply.
+
+**A well-built system that produces a clear negative answer is a successful
+project.** Build for measurement honesty, not for numbers that look good.

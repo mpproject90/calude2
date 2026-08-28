@@ -291,6 +291,20 @@ describe('Binance provider', () => {
       .rejects.toThrow(/malformed kline row/);
   });
 
+  it('captures the first raw response verbatim, once', async () => {
+    const samples: unknown[] = [];
+    const full = Array.from({ length: 1000 }, (_, i) => row(i));
+    const { fetchFn } = mockFetch([full, [row(1000)]]);
+    const p = provider(fetchFn, { onRawSample: (s: unknown) => samples.push(s) });
+    await p.getCandles('JUP', '1h', T0, T0 + 2000 * H);
+    expect(samples).toHaveLength(1);                       // once, not per page
+    const sample = samples[0] as { url: string; rowCount: number; firstRows: unknown[] };
+    expect(sample.url).toContain('symbol=JUPUSDT');
+    expect(sample.rowCount).toBe(1000);
+    expect(sample.firstRows).toHaveLength(3);
+    expect(sample.firstRows[0]).toEqual(row(0));           // verbatim, unparsed
+  });
+
   it('surfaces a non-OK HTTP status', async () => {
     const { fetchFn } = mockFetch([[]], [500]);
     await expect(provider(fetchFn).getCandles('JUP', '1h', T0, T0 + H))

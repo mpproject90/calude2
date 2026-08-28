@@ -10,11 +10,13 @@
  * Requires only outbound access to api.binance.com — no API key, no cloud
  * services, nothing environment-specific.
  */
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { openDb } from '../db/index.js';
 import { createLogger } from '../util/logger.js';
 import { INTERVAL_MS, INTERVALS, type Interval } from '../types/index.js';
 import { CandleService } from '../data/index.js';
-import { BinanceCandleProvider } from '../data/providers/binance.js';
+import { BinanceCandleProvider, type RawSample } from '../data/providers/binance.js';
 import { synthesizeRatioSeries, rangeWideningRatio } from '../data/synthesize.js';
 import { detectSeriesIssues } from '../data/gaps.js';
 
@@ -45,8 +47,12 @@ const from = to - Math.round(days * 86_400_000);
 const log = createLogger('info');
 const db = openDb(dbPath);
 
+const rawSamplePath = arg('raw-sample', 'data/raw-sample.json');
+let rawSample: RawSample | null = null;
+
 const provider = new BinanceCandleProvider({
   symbolMap: { [symbol]: `${symbol}USDT`, SOL: 'SOLUSDT' },
+  onRawSample: (sample) => { rawSample = sample; },
 });
 const service = new CandleService({ provider, db, logger: log });
 
@@ -89,6 +95,25 @@ const main = async (): Promise<void> => {
     `  the widest possible BOUNDS, so ATR is biased high and MFI's typical price\n` +
     `  is approximate. Use the finest base timeframe you can to tighten them.`,
   );
+
+  // Dump the raw response alongside the parsed result. The provider has never
+  // run against the live API, so if anything looks wrong this file is the
+  // ground truth to send back rather than a description of it.
+  if (rawSample !== null) {
+    const sample: RawSample = rawSample;
+    mkdirSync(dirname(rawSamplePath), { recursive: true });
+    writeFileSync(rawSamplePath, JSON.stringify({
+      note: 'Verbatim Binance klines response rows, with this build\'s parse of row 0.',
+      request: { symbol: `${symbol}USDT`, interval, from, to },
+      raw: sample,
+      parsedRow0: token.candles[0] ?? null,
+      parsedRow0Iso: token.candles[0] === undefined
+        ? null : new Date(token.candles[0].timestamp).toISOString(),
+    }, null, 2));
+    console.log(`\nraw sample written to ${rawSamplePath}`);
+  } else {
+    console.log('\nno raw sample captured (everything served from cache)');
+  }
 
   db.close();
 };
