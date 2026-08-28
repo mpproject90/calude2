@@ -10,6 +10,8 @@ global:
   maxAllocationPerTokenPct: 20
   indicatorWarmupMultiplier: 7      # period * 7 candles before any value is emitted
   minTradesForConclusion: 50
+  stopPollSeconds: 30            # live stops are evaluated intrabar, not on candle close
+  exitSlippagePct: 0.5           # modelled adverse slippage on a stop fill
 
   regimeFilter:
     enabled: true

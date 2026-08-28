@@ -24,6 +24,24 @@ describe('secret redaction', () => {
     expect(redact(pub)).toBe(pub);
   });
 
+  it('does NOT redact a trading token symbol or address', () => {
+    // "token" here means a tradeable SPL token, not an auth credential. It
+    // appears in nearly every log line; redacting it would blind the logs.
+    const out = redact({
+      token: 'JUP', tokenAddress: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',
+    }) as Record<string, unknown>;
+    expect(out['token']).toBe('JUP');
+    expect(out['tokenAddress']).toBe('JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN');
+  });
+
+  it('still redacts auth-style token names', () => {
+    const out = redact({
+      accessToken: 'a', authToken: 'b', bearerToken: 'c',
+      refreshToken: 'd', apiToken: 'e', sessionToken: 'f',
+    }) as Record<string, unknown>;
+    for (const v of Object.values(out)) expect(v).toBe('[REDACTED]');
+  });
+
   it('recurses through nested structures', () => {
     const out = redact({ a: { b: [{ secret: 's' }] } }) as any;
     expect(out.a.b[0].secret).toBe('[REDACTED]');

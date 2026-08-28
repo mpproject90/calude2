@@ -6,7 +6,10 @@ import {
   crossedUpThrough, crossedDownThrough, wasOverboughtWithin, hasBullishDivergence,
 } from '../src/rules/conditions.js';
 import { evaluateEntry } from '../src/rules/entry.js';
-import { evaluateExit, stopLossPriceFor, timeExitIndexFor, type OpenPosition } from '../src/rules/exit.js';
+import {
+  evaluateExit, evaluateIntrabarStops, stopLossPriceFor, timeExitIndexFor,
+  type OpenPosition,
+} from '../src/rules/exit.js';
 import { checkPortfolioLimits, rollingDailyLoss } from '../src/rules/portfolio.js';
 import { pass as filterPass, fail as filterFail } from '../src/filters/types.js';
 import { sol } from '../src/util/amount.js';
@@ -170,34 +173,89 @@ describe('entry rule', () => {
 
 describe('exit rules', () => {
   const cfg = tokenCfg();
+  const SLIP = 0.5;
   const position = (over: Partial<OpenPosition> = {}): OpenPosition => ({
     entryPrice: 100, entryIndex: 0, peakPrice: 100, trailingArmed: false,
     stopLossPrice: stopLossPriceFor(100, 15), ...over,
   });
+  const run = (candles: Candle[], index: number, rsi: IndicatorValue[],
+               token = cfg, pos = position(), safetyBreach?: boolean) =>
+    evaluateExit({ candles, index, rsi, token, position: pos,
+                   exitSlippagePct: SLIP, ...(safetyBreach === undefined ? {} : { safetyBreach }) });
 
   it('writes a stop and a time exit at fill time', () => {
     expect(stopLossPriceFor(100, 15)).toBeCloseTo(85, 10);
     expect(timeExitIndexFor(10, 48)).toBe(58);
   });
 
-  it('fires the stop-loss first', () => {
-    const c = bars([100, 84]);
-    const d = evaluateExit({ candles: c, index: 1, rsi: [R(50), R(80)], token: cfg, position: position() });
+  it('STOPS OUT INTRABAR even when the close recovered above the stop', () => {
+    // low 80 pierced the 85 stop; close 90 did not. A close-only rule misses this.
+    const c = bars([100, 90], [100, 80]);
+    const d = run(c, 1, [R(50), R(50)]);
     expect(d.exit).toBe(true);
-    expect(d.reason).toBe('stop_loss');   // beats the RSI-70 condition also true here
+    expect(d.reason).toBe('stop_loss');
   });
 
-  it('fires the time exit once the holding limit is reached', () => {
-    const c = bars(new Array(50).fill(100));
-    const d = evaluateExit({ candles: c, index: 48, rsi: new Array(50).fill(R(50)), token: cfg, position: position() });
-    expect(d.exit).toBe(true);
-    expect(d.reason).toBe('time');
+  it('fills a stop at the stop price less slippage, never at the close', () => {
+    const c = bars([100, 90], [100, 80]);
+    const d = run(c, 1, [R(50), R(50)]);
+    expect(d.fillPrice).toBeCloseTo(85 * (1 - SLIP / 100), 10);   // 84.575
+    expect(d.fillPrice).not.toBeCloseTo(90, 5);
+    expect(d.context['realizedPct'] as number).toBeCloseTo(-15.425, 8);
   });
 
-  it('fires the RSI recovery exit — and does so underwater, as designed', () => {
-    const c = bars([100, 90]);
-    const d = evaluateExit({ candles: c, index: 1, rsi: [R(20), R(75)], token: cfg, position: position() });
-    expect(d.exit).toBe(true);
+  it('still reports intrabarStopBreach so the old behaviour can be costed', () => {
+    const c = bars([100, 90], [100, 80]);
+    expect(run(c, 1, [R(50), R(50)]).context['intrabarStopBreach']).toBe(true);
+  });
+
+  it('does not stop out when the low stayed above the stop', () => {
+    const c = bars([100, 95], [100, 90]);
+    const d = run(c, 1, [R(50), R(50)]);
+    expect(d.exit).toBe(false);
+    expect(d.context['intrabarStopBreach']).toBe(false);
+  });
+
+  it('lets safety override even a triggered stop', () => {
+    const c = bars([100, 80], [100, 70]);
+    expect(run(c, 1, [R(50), R(50)], cfg, position(), true).reason).toBe('safety');
+  });
+
+  it('puts the stop ahead of the RSI exit', () => {
+    const c = bars([100, 84], [100, 80]);
+    expect(run(c, 1, [R(50), R(80)]).reason).toBe('stop_loss');
+  });
+
+  describe('priority: time is last', () => {
+    const trail = tokenCfg({
+      exit: { timeExitCandles: 1, trailingStop: { enabled: true, activateAtPct: 20, trailPct: 10 } },
+    });
+
+    it('prefers the trailing stop over a time exit due on the same bar', () => {
+      // armed at entry, peak 130 intrabar, low 110 breaches the 117 trail
+      const c = bars([100, 115], [100, 110]);
+      const withHigh = c.map((b, i) => (i === 1 ? { ...b, high: 130 } : b));
+      const d = run(withHigh, 1, [R(50), R(50)], trail, position({ peakPrice: 100 }));
+      expect(d.reason).toBe('trailing');
+    });
+
+    it('prefers the RSI exit over a time exit due on the same bar', () => {
+      const c = bars([100, 120]);
+      const d = run(c, 1, [R(50), R(75)], trail);
+      expect(d.reason).toBe('rsi_recovery');
+    });
+
+    it('falls back to the time exit when no profit exit fired', () => {
+      const c = bars([100, 101]);
+      const d = run(c, 1, [R(50), R(50)], trail);
+      expect(d.reason).toBe('time');
+      expect(d.fillPrice).toBe(101);
+    });
+  });
+
+  it('fires the RSI recovery exit underwater, as designed', () => {
+    const c = bars([100, 90], [100, 88]);
+    const d = run(c, 1, [R(20), R(75)]);
     expect(d.reason).toBe('rsi_recovery');
     expect(d.context['gainPct'] as number).toBeCloseTo(-10, 10);
     expect(d.detail).toMatch(/underwater/);
@@ -205,56 +263,70 @@ describe('exit rules', () => {
 
   it('will not exit on an unreliable RSI', () => {
     const c = bars([100, 101]);
-    const d = evaluateExit({ candles: c, index: 1, rsi: [R(20), R(90, false)], token: cfg, position: position() });
-    expect(d.exit).toBe(false);
+    expect(run(c, 1, [R(20), R(90, false)]).exit).toBe(false);
   });
 
-  it('arms and then fires the trailing stop', () => {
-    const trail = tokenCfg({ exit: { trailingStop: { enabled: true, activateAtPct: 20, trailPct: 10 } } });
-    const c = bars([100, 125, 110]);
-    const rsi = [R(50), R(50), R(50)];
-    let pos = position();
-    const step1 = evaluateExit({ candles: c, index: 1, rsi, token: trail, position: pos });
-    expect(step1.exit).toBe(false);
-    expect(step1.nextPosition.trailingArmed).toBe(true);
-    expect(step1.nextPosition.peakPrice).toBe(125);
-    pos = step1.nextPosition;
-    const step2 = evaluateExit({ candles: c, index: 2, rsi, token: trail, position: pos });
-    expect(step2.exit).toBe(true);
-    expect(step2.reason).toBe('trailing');   // 110 < 125 * 0.9 = 112.5
-  });
-
-  it('does not trail before the activation gain', () => {
-    const trail = tokenCfg({ exit: { trailingStop: { enabled: true, activateAtPct: 20, trailPct: 10 } } });
-    const c = bars([100, 105, 94]);
-    const rsi = [R(50), R(50), R(50)];
-    const step1 = evaluateExit({ candles: c, index: 1, rsi, token: trail, position: position() });
-    expect(step1.nextPosition.trailingArmed).toBe(false);
-    const step2 = evaluateExit({ candles: c, index: 2, rsi, token: trail, position: step1.nextPosition });
-    expect(step2.exit).toBe(false);
-  });
-
-  it('reports an intrabar stop breach the close-only rule misses', () => {
-    const c = bars([100, 90], [100, 80]);   // low 80 pierced the 85 stop, close 90 did not
-    const d = evaluateExit({ candles: c, index: 1, rsi: [R(50), R(50)], token: cfg, position: position() });
-    expect(d.exit).toBe(false);
-    expect(d.context['intrabarStopBreach']).toBe(true);
-  });
-
-  it('lets a safety breach override everything', () => {
-    const c = bars([100, 120]);
-    const d = evaluateExit({
-      candles: c, index: 1, rsi: [R(50), R(50)], token: cfg,
-      position: position(), safetyBreach: true,
+  it('arms trailing from the bar HIGH, then fires against the bar LOW', () => {
+    const trail = tokenCfg({
+      exit: { trailingStop: { enabled: true, activateAtPct: 20, trailPct: 10 } },
     });
-    expect(d.reason).toBe('safety');
+    // one bar: high 125 arms (+25%) and sets the peak; low 110 breaches 112.5
+    const c = [{ timestamp: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 },
+               { timestamp: 3_600_000, open: 100, high: 125, low: 110, close: 118, volume: 1 }];
+    const d = run(c, 1, [R(50), R(50)], trail);
+    expect(d.reason).toBe('trailing');
+    expect(d.context['peakPrice']).toBe(125);
+    expect(d.fillPrice).toBeCloseTo(112.5 * (1 - SLIP / 100), 8);
+  });
+
+  it('does not trail before the activation gain is reached', () => {
+    const trail = tokenCfg({
+      exit: { trailingStop: { enabled: true, activateAtPct: 20, trailPct: 10 } },
+    });
+    const c = [{ timestamp: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 },
+               { timestamp: 3_600_000, open: 100, high: 105, low: 92, close: 94, volume: 1 }];
+    const d = run(c, 1, [R(50), R(50)], trail);
+    expect(d.exit).toBe(false);
+    expect(d.nextPosition.trailingArmed).toBe(false);
   });
 
   it('holds when nothing triggers', () => {
     const c = bars([100, 101]);
-    const d = evaluateExit({ candles: c, index: 1, rsi: [R(50), R(50)], token: cfg, position: position() });
+    const d = run(c, 1, [R(50), R(50)]);
     expect(d.exit).toBe(false);
     expect(d.reason).toBeNull();
+    expect(d.fillPrice).toBeNull();
+  });
+
+  describe('live tick evaluation', () => {
+    // In live mode the poller passes the same tick as both low and high, so the
+    // stop is evaluated independently of any candle boundary.
+    const tick = (price: number, pos = position(), token = cfg) =>
+      evaluateIntrabarStops({
+        token, position: pos, window: { low: price, high: price }, exitSlippagePct: SLIP,
+      });
+
+    it('triggers on a tick below the stop, with no candle involved', () => {
+      const r = tick(84.9);
+      expect(r.trigger?.reason).toBe('stop_loss');
+      expect(r.trigger?.fillPrice).toBeCloseTo(85 * (1 - SLIP / 100), 10);
+    });
+
+    it('does not trigger on a tick above the stop', () => {
+      expect(tick(85.1).trigger).toBeNull();
+    });
+
+    it('arms trailing from ticks and fires on a later tick', () => {
+      const trail = tokenCfg({
+        exit: { trailingStop: { enabled: true, activateAtPct: 20, trailPct: 10 } },
+      });
+      const up = tick(130, position(), trail);
+      expect(up.trigger).toBeNull();
+      expect(up.nextPosition.trailingArmed).toBe(true);
+      expect(up.nextPosition.peakPrice).toBe(130);
+      const down = tick(116, up.nextPosition, trail);   // 130 * 0.9 = 117
+      expect(down.trigger?.reason).toBe('trailing');
+    });
   });
 });
 

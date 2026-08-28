@@ -179,6 +179,15 @@ export const globalSchema = z.object({
   indicatorWarmupMultiplier: z.number().int().min(1).default(7),
   /** §10 — warn below this trade count. */
   minTradesForConclusion: z.number().int().positive().default(50),
+  /**
+   * How often live mode polls price to evaluate stops, in seconds. Stops are
+   * evaluated intrabar, independent of candle boundaries: a 15% stop checked
+   * once an hour is not a 15% stop. Must be faster than the shortest configured
+   * token timeframe to be worth anything.
+   */
+  stopPollSeconds: z.number().int().positive().max(3600).default(30),
+  /** Modelled adverse slippage on a stop fill, in percent. */
+  exitSlippagePct: z.number().min(0).default(0.5),
 });
 
 export const configSchema = z

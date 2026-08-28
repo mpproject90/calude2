@@ -3,14 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Solana RSI/MFI mean-reversion trading bot — backtest, paper, live",
-  "engines": { "node": ">=20" },
+  "description": "Solana RSI/MFI mean-reversion trading bot \u2014 backtest, paper, live",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "config:check": "tsx src/cli/config-check.ts"
+    "config:check": "tsx src/cli/config-check.ts",
+    "data:fetch": "tsx src/cli/fetch-data.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",

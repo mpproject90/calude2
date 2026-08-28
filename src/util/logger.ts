@@ -7,8 +7,16 @@ export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 const LEVEL_ORDER: Record<LogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
+/**
+ * Key names whose VALUES must never be logged.
+ *
+ * Note what is deliberately absent: a bare `token`. In this project "token"
+ * means a tradeable SPL token, and it appears in almost every log line —
+ * redacting it made the logs useless while protecting nothing. Auth-style
+ * token names are still matched by their qualifier.
+ */
 const SECRET_KEY_PATTERN =
-  /(private|secret|seed|mnemonic|keypair|passphrase|apikey|api_key|token)/i;
+  /(private|secret|seed|mnemonic|keypair|passphrase|apikey|api[-_]?key|(access|auth|bearer|api|refresh|session|id)[-_]?token)/i;
 
 /** Anything that looks like a base58 key of key-length. Belt and braces. */
 const BASE58_KEYLIKE = /\b[1-9A-HJ-NP-Za-km-z]{64,}\b/g;
