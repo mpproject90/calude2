@@ -49,10 +49,16 @@ bug.
 | 3 | **Rejected candles** | zero | real data violates an invariant asserted in `src/data/validate.ts` |
 | 4 | **Range widening** | as low as possible | see the decision rule below |
 
-Also send `data/raw-sample.json` if anything looks wrong. It contains the
-verbatim first Binance response rows plus this build's parse of row 0, so a shape
-mismatch can be diagnosed from actual data rather than a description of it. It is
-gitignored, so it stays local until sent.
+Also send the raw sample if anything looks wrong. It contains the verbatim first
+Binance response rows plus this build's parse of row 0, so a shape mismatch can
+be diagnosed from actual data rather than from a description of it.
+
+> **The raw sample is NOT in this repository and never will be.** `data/` is
+> gitignored, so `data/raw-sample.json` does not exist in a fresh clone — do not
+> go looking for it and do not treat its absence as a problem. It is *generated
+> on the operator's machine* by the `data:fetch` run above, and reaches the
+> assistant only when the operator pastes or uploads it. Path is configurable
+> with `--raw-sample <path>`.
 
 ### Decision rule for range widening
 
@@ -178,8 +184,10 @@ From SPEC §10 and decisions made since:
      comm -23 /tmp/tree.txt /tmp/index.txt   # on disk, not tracked
      comm -13 /tmp/tree.txt /tmp/index.txt   # tracked, missing from disk
      ```
-     Every difference must be *intentionally* ignored. Currently expected:
-     `.env` and `data/raw-sample.json`, nothing else.
+     Every difference must be *intentionally* ignored. Expected after a local
+     `data:fetch` run: `.env` and the generated `data/` contents (the SQLite
+     cache and `raw-sample.json`), nothing else. In a fresh clone that has not
+     been run, only `.env` — and only once setup has created it.
   `test/repo-hygiene.test.ts` automates most of this and runs with the suite.
 - Never present backtest results without trade count, the out-of-sample split,
   and total costs paid. Report numbers and limitations; let the operator draw the

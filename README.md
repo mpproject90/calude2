@@ -77,7 +77,8 @@ npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db
 Pulls `<SYMBOL>USDT` and `SOLUSDT`, caches both in SQLite, synthesizes
 `<SYMBOL>/SOL`, and reports coverage, gaps, rejections and range widening. It
 also writes `data/raw-sample.json` — verbatim response rows plus this build's
-parse of row 0.
+parse of row 0. That file is **generated locally and gitignored**: it is not part
+of the repository and will not be present in a fresh clone.
 
 What to scrutinise:
 
@@ -93,8 +94,8 @@ What to scrutinise:
   the data-quality fix before changing the strategy's shape.
 
 The Binance provider has **never made a real request** (every test uses a mock),
-so this review is also how its parsing gets verified. Send back
-`data/raw-sample.json` if anything looks wrong.
+so this review is also how its parsing gets verified. If anything looks wrong,
+send back the locally generated `data/raw-sample.json` described above.
 
 ## Layout
 

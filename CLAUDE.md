@@ -70,6 +70,10 @@ npm run data:fetch -- --symbol JUP --interval 1h --days 90
 `data:fetch` needs outbound access to `api.binance.com`. It will not run in a
 sandboxed environment that blocks that host — that is expected, not a bug.
 
+Anything under `data/` — the SQLite cache and `raw-sample.json` — is generated at
+runtime and gitignored. It is never in the repository; its absence in a fresh
+clone is correct, not a missing file.
+
 ## Branch
 
 `main` is the working branch and the repository default.
