@@ -359,14 +359,46 @@ describe('ladder cost preview (DECISIONS §40) — config-time economics per tra
     expect(t.slippagePct).toBeCloseTo((1.15 / 1000) * 100, 8);
   });
 
-  it('compares a partial ladder (a held runner) against a full single exit, not a partial one', () => {
+  it('compares a partial ladder (a held runner) against a single exit of the SAME sold amount, not the full position', () => {
     const input: LadderCostPreviewInput = {
       originalPositionSol: 1,
       ladder: { tranches: [{ targetGainPct: 20, sellPct: 40 }], minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20 },
       ...baseCosts,
     };
     const r = computeLadderCostPreview(input);
-    expect(r.singleExit.averageGainPct).toBeCloseTo(20, 10);       // blended over the SOLD portion only
-    expect(r.singleExit.grossProceedsSol).toBeCloseTo(1.2, 10);    // but applied to the FULL position
+    expect(r.singleExit.averageGainPct).toBeCloseTo(20, 10);
+    // sells the SAME 40% of the position the ladder sold, not the full 1 SOL —
+    // 0.4 SOL at +20% = 0.48 gross. A held 60% runner contributes to neither number.
+    expect(r.singleExit.grossProceedsSol).toBeCloseTo(0.48, 10);
+  });
+
+  it('a ladder selling exactly 100% has NO artefact from the sold-amount fix — matches the earlier two-tranche case', () => {
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 1,
+      ladder: {
+        tranches: [{ targetGainPct: 15, sellPct: 50 }, { targetGainPct: 30, sellPct: 50 }],
+        minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20,
+      },
+      ...baseCosts,
+    };
+    const r = computeLadderCostPreview(input);
+    expect(r.singleExit.grossProceedsSol).toBeCloseTo(1.225, 10);   // unchanged: 100% sold either way
+    expect(r.ladderPremiumPct).toBeCloseTo(0.06, 6);
+  });
+
+  it('the laddering premium is never negative for a ladder that sells the same total as the single exit', () => {
+    // Regression: comparing a PARTIAL ladder against a FULL single exit produced a
+    // negative "premium" (the ladder looked cheaper only because it sold less) —
+    // fixed by sizing the single exit to the same sold amount.
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 1,
+      ladder: {
+        tranches: [{ targetGainPct: 15, sellPct: 0.1 }, { targetGainPct: 30, sellPct: 50 }],
+        minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20,
+      },
+      ...baseCosts,
+    };
+    const r = computeLadderCostPreview(input);
+    expect(r.ladderPremiumPct).toBeGreaterThanOrEqual(0);
   });
 });

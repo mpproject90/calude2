@@ -112,11 +112,18 @@ export function computeLadderCostPreview(input: LadderCostPreviewInput): LadderC
   const ladderTotalExitCostSol = tranches.reduce((s, t) => s + t.totalExitCostSol, 0);
   const ladderTotalExitCostPctOfPosition = originalPositionSol > 0 ? (ladderTotalExitCostSol / originalPositionSol) * 100 : 0;
 
+  // The single-exit comparison must sell the SAME total amount the ladder
+  // actually sells (sumSellPct% of the position), not the full position —
+  // a ladder that only sells 50% and holds the rest as a runner is not
+  // comparable to a hypothetical single exit of the OTHER position that
+  // sells 100%. Any held remainder sits outside both numbers, unsold
+  // either way, so it cannot count as part of "the cost of laddering."
   const sumSellPct = ladder.tranches.reduce((s, t) => s + t.sellPct, 0);
   const averageGainPct = sumSellPct > 0
     ? ladder.tranches.reduce((s, t) => s + t.targetGainPct * t.sellPct, 0) / sumSellPct
     : 0;
-  const singleGrossProceedsSol = originalPositionSol * (1 + averageGainPct / 100);
+  const soldPositionSol = originalPositionSol * (sumSellPct / 100);
+  const singleGrossProceedsSol = soldPositionSol * (1 + averageGainPct / 100);
   const singleCost = exitLegCost(singleGrossProceedsSol, dexFeePct, priorityFeeSol, jitoTipSol, fallbackSlippagePct, poolLiquiditySol);
   const singleExit: SingleExitPreview = {
     averageGainPct, grossProceedsSol: singleGrossProceedsSol, totalExitCostSol: singleCost.totalSol,
