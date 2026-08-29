@@ -53,10 +53,10 @@ import { detectSeriesIssues } from '../data/gaps.js';
 import { BinanceCandleProvider, type RawSample as BinanceRawSample } from '../data/providers/binance.js';
 import {
   GeckoTerminalCandleProvider, SOL_MINT, USDC_MINT,
-  type PoolCandidate, type RateLimitEvent, type RawSample as GtRawSample,
+  type RateLimitEvent, type RawSample as GtRawSample,
 } from '../data/providers/geckoterminal.js';
 import { synthesizeRatioSeries, rangeWideningRatio } from '../data/synthesize.js';
-import { selectDominantPool, type PoolDominanceResult, type PoolSeries } from '../data/poolSelection.js';
+import { resolvePoolSeries } from '../data/poolResolution.js';
 import { computeWickDiagnostics } from '../data/wickDiagnostics.js';
 
 function arg(name: string, fallback?: string): string {
@@ -166,71 +166,6 @@ function resolvePinnedSolPool(cfg: LightConfig): string | null {
   return cfg.global?.solReferencePoolAddress ?? null;
 }
 
-interface PoolResolution {
-  readonly candles: readonly Candle[];
-  readonly pool: string | null;
-  readonly pinned: boolean;
-  readonly candidates: readonly PoolCandidate[];
-  readonly dominance: PoolDominanceResult | null;
-}
-
-async function resolvePoolSeries(
-  label: string, tokenMint: string, pairedMint: string, gecko: GeckoTerminalCandleProvider,
-  pinnedAddress: string | null,
-): Promise<PoolResolution> {
-  if (pinnedAddress !== null) {
-    console.log(
-      `\n${label}: PINNED to ${pinnedAddress} — pool discovery and dominance comparison ` +
-      'SKIPPED for this run (DECISIONS §29/§30). Trading determinism and far fewer requests ' +
-      'for the ability to notice a dominance shift.',
-    );
-    const candles = await gecko.getPoolOhlcv(pinnedAddress, interval, from, to);
-    return { candles, pool: pinnedAddress, pinned: true, candidates: [], dominance: null };
-  }
-
-  const candidates = await gecko.searchPools(tokenMint, pairedMint);
-  console.log(`\n${label} pool candidates: ${candidates.length}`);
-  for (const c of candidates) {
-    console.log(`  ${c.address}  dex=${c.dex}  createdAt=${c.createdAt ?? 'unknown'}  reserveUsdNow=${c.reserveUsd ?? 'unknown'}`);
-  }
-  if (candidates.length === 0) {
-    throw new Error(`no ${label} pool found on GeckoTerminal — cannot proceed without a trading pair`);
-  }
-
-  // A single candidate's OHLCV fetch failing (e.g. an unresolved rate limit,
-  // DECISIONS §24) should not sink the whole pull when other candidates
-  // already succeeded — only fail closed if EVERY candidate fails.
-  const series: PoolSeries[] = [];
-  for (const c of candidates) {
-    try {
-      series.push({ address: c.address, candles: await gecko.getPoolOhlcv(c.address, interval, from, to) });
-    } catch (err) {
-      console.log(`  WARNING: ${c.address} (dex=${c.dex}) failed and is excluded from selection:`);
-      console.log(`    ${formatErrorChain(err).split('\n').join('\n    ')}`);
-    }
-  }
-  if (series.length === 0) {
-    throw new Error(`all ${candidates.length} ${label} pool candidate(s) failed — cannot select a series`);
-  }
-  const dominance = selectDominantPool(series, interval);
-
-  console.log(`${label} volume share by pool: ${JSON.stringify(dominance.volumeShareByPool)}`);
-  if (dominance.migrated) {
-    console.log(`${label} DOMINANCE MIGRATED mid-window:`);
-    for (const p of dominance.dominancePeriods) {
-      console.log(`  ${p.pool}  ${new Date(p.fromTimestamp).toISOString()} -> ${new Date(p.toTimestamp).toISOString()}`);
-    }
-    console.log(
-      '  Using only the single highest-total-volume pool for the whole series (below) — the\n' +
-      '  other pool\'s periods are NOT spliced in. Wherever the selected pool has no bars in\n' +
-      '  those periods, that shows up as a gap, not a fabricated bar.',
-    );
-  }
-
-  const winner = dominance.selected === null ? undefined : series.find((s) => s.address === dominance.selected);
-  return { candles: winner?.candles ?? [], pool: dominance.selected, pinned: false, candidates, dominance };
-}
-
 function cacheAndReport(
   repo: CandleRepository, token: string, candles: readonly Candle[], provider: string, poolAddress: string,
 ): Candle[] {
@@ -294,12 +229,12 @@ async function runGeckoTerminal(): Promise<void> {
   const repo = new CandleRepository(db);
 
   try {
-    const tokenPull = await resolvePoolSeries(`${symbol}/SOL`, tokenAddress, SOL_MINT, gecko, pinnedTokenPool);
+    const tokenPull = await resolvePoolSeries(`${symbol}/SOL`, tokenAddress, SOL_MINT, gecko, pinnedTokenPool, interval, from, to);
     tokenPool = tokenPull.pool;
     console.log(`\n${symbol}/SOL selected pool: ${tokenPool ?? 'NONE — no pool traded in this window'}${tokenPull.pinned ? '  [PINNED — dominance comparison skipped]' : ''}`);
     tokenCandles = cacheAndReport(repo, symbol, tokenPull.candles, 'geckoterminal', tokenPool ?? '');
 
-    const solPull = await resolvePoolSeries('SOL/USDC', SOL_MINT, USDC_MINT, geckoRef, pinnedSolPool);
+    const solPull = await resolvePoolSeries('SOL/USDC', SOL_MINT, USDC_MINT, geckoRef, pinnedSolPool, interval, from, to);
     solPool = solPull.pool;
     console.log(`\nSOL/USDC selected pool: ${solPool ?? 'NONE — no pool traded in this window'}${solPull.pinned ? '  [PINNED — dominance comparison skipped]' : ''}`);
     cacheAndReport(repo, 'SOL', solPull.candles, 'geckoterminal', solPool ?? '');

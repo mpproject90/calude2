@@ -4,6 +4,7 @@ import { aggregateCandles, AggregateError } from '../src/data/aggregate.js';
 import { regimeBucketIndices } from '../src/backtest/regimeAlignment.js';
 import { runBacktest, type ClosedBacktestTrade } from '../src/backtest/engine.js';
 import { computeSampleMetrics, computeBacktestMetrics } from '../src/backtest/metrics.js';
+import { computeEntryFunnel } from '../src/backtest/funnel.js';
 import { parseConfig } from '../src/config/load.js';
 import type { Config, TokenConfig } from '../src/config/schema.js';
 import { computeRsi } from '../src/indicators/rsi.js';
@@ -420,5 +421,74 @@ describe('backtest metrics', () => {
     const m = computeBacktestMetrics([], rejected, 50, 0.3);
     expect(m.rejectedByFilter['indicators-reliable']).toBe(2);
     expect(m.rejectedByFilter['filter:regime']).toBe(1);
+  });
+});
+
+describe('entry funnel (DECISIONS §32) — no backtest, just condition counts', () => {
+  const closes = [50, 65, 80, 95, 80, 65, 50, 45, 40, 35, 30, 34, 40, 45, 50, 50, 50, 50];
+  const candles = series(closes);
+  const flatSolCandles = flatSol(closes.length);
+  const cfg = buildConfig();
+  const token = cfg.tokens[0]!;
+  const global = cfg.global;
+
+  it('funnel counts are non-negative and non-increasing stage over stage', () => {
+    const result = computeEntryFunnel(candles, flatSolCandles, token, global);
+    const c = result.counts;
+    expect(c.reliable).toBeGreaterThanOrEqual(c.priorOverbought);
+    expect(c.priorOverbought).toBeGreaterThanOrEqual(c.rsiCrossUp);
+    expect(c.rsiCrossUp).toBeGreaterThanOrEqual(c.mfiConfirms);
+    expect(c.mfiConfirms).toBeGreaterThanOrEqual(c.relativeStrengthPasses);
+    expect(c.relativeStrengthPasses).toBeGreaterThanOrEqual(c.regimePasses);
+  });
+
+  it('reports the same bar/gap counts the engine sees', () => {
+    const result = computeEntryFunnel(candles, flatSolCandles, token, global);
+    expect(result.bars).toBe(candles.length);
+    expect(result.gaps).toBe(0);
+  });
+
+  it('finds the same textbook signal the engine trades on, all the way through regime', () => {
+    // Same fixture the engine describe block above trades on -- confirms the
+    // funnel and the real entry path agree, not a separate reimplementation.
+    const result = computeEntryFunnel(candles, flatSolCandles, token, global);
+    expect(result.counts.rsiCrossUp).toBeGreaterThanOrEqual(1);
+    expect(result.counts.mfiConfirms).toBeGreaterThanOrEqual(1);
+    expect(result.counts.relativeStrengthPasses).toBeGreaterThanOrEqual(1);
+    expect(result.counts.regimePasses).toBeGreaterThanOrEqual(1);   // regime disabled by buildConfig -> always passes
+  });
+
+  it("the relative-strength differential equals the token series' own ratio return, independent of the SOL path (DECISIONS §20/§27)", () => {
+    // A deliberately NON-flat SOL reference -- if the cancellation math were
+    // wrong, this would diverge from the flat-SOL case; it must not.
+    const nonFlatSol: Candle[] = closes.map((_, i) => ({
+      timestamp: T0 + i * H, open: 40 + i, high: 41 + i, low: 39 + i, close: 40 + i, volume: 1000,
+    }));
+    const result = computeEntryFunnel(candles, nonFlatSol, token, global);
+    expect(result.crossUpEvents.length).toBeGreaterThan(0);
+    let checked = 0;
+    for (const e of result.crossUpEvents) {
+      if (e.differential === null) continue;
+      const expected = candles[e.index]!.close / candles[e.index - token.entry.relativeStrengthLookback]!.close - 1;
+      expect(e.differential).toBeCloseTo(expected, 8);
+      checked++;
+    }
+    expect(checked).toBeGreaterThan(0);
+  });
+
+  it('the longest reliable stretch shortens when a gap falls inside the shadow window', () => {
+    const allCloses = Array.from({ length: 40 }, (_, i) => 50 + Math.sin(i / 3) * 10 + i);
+    const full = series(allCloses);
+    const withGap = full.filter((_, i) => i !== 15);
+    const solFlat = flatSol(withGap.length);
+    const solFlatFull = flatSol(full.length);
+
+    const gapCfg = buildConfig({ indicatorWarmupMultiplier: 3 });   // warm-up = period(2) * 3 = 6
+    const withGapResult = computeEntryFunnel(withGap, solFlat, gapCfg.tokens[0]!, gapCfg.global);
+    const withoutGapResult = computeEntryFunnel(full, solFlatFull, gapCfg.tokens[0]!, gapCfg.global);
+
+    expect(withGapResult.gaps).toBe(1);
+    expect(withoutGapResult.gaps).toBe(0);
+    expect(withGapResult.longestReliableStretch).toBeLessThan(withoutGapResult.longestReliableStretch);
   });
 });

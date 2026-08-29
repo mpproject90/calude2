@@ -14,6 +14,7 @@
     "test:watch": "vitest",
     "config:check": "tsx src/cli/config-check.ts",
     "data:fetch": "tsx src/cli/fetch-data.ts",
+    "data:screen": "tsx src/cli/screen.ts",
     "backtest": "tsx src/cli/backtest.ts"
   },
   "dependencies": {
