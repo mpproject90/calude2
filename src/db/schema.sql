@@ -1,4 +1,4 @@
--- Schema v2. Everything persists: a restart must not lose open position state
+-- Schema v3. Everything persists: a restart must not lose open position state
 -- (spec §3). On-chain amounts are stored as TEXT holding the raw integer
 -- (smallest-unit) value — never as REAL — per spec §2.5.
 --
@@ -12,6 +12,13 @@
 -- timestamp. Confirmed happening in normal use, not as a theoretical edge
 -- case. '' (empty string) means "not a pool-based series" — Binance symbols
 -- have no pool address.
+--
+-- v2 -> v3 (DECISIONS §41): paper_positions/paper_fills/paper_events added
+-- for phase 2 paper trading — see the block near the bottom of this file.
+-- New tables, not a migration of the existing `positions` table, which was
+-- shaped for the phase-1 indicator-driven, single-fill, candle-indexed
+-- position model and does not fit the new price-triggered, multi-tranche,
+-- wall-clock one.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -146,3 +153,77 @@ CREATE TABLE IF NOT EXISTS token_state (
   cooldown_until_ts INTEGER,
   last_safety_check INTEGER
 ) WITHOUT ROWID;
+
+-- ============================================================ v3 (§41) ===
+-- Phase 2 paper trading — manual entry, price-triggered, multi-tranche
+-- ladder exit. NOT the same shape as the phase-1 `positions` table above
+-- (candle-indexed, single-fill, tier-gated CHECK constraints, no
+-- 'take_profit' exit reason) — forcing the new ladder position through
+-- that table would mean weakening constraints that exist for good reason
+-- in the old model, for a position shape (wall-clock time, partial
+-- multi-tranche fills, no tier) that genuinely differs. New tables, not a
+-- migration of the old one; `positions` stays exactly as phase 1 left it.
+
+-- One row per manually-entered position, mutable — this IS the resumable
+-- state a restart reloads from. `status='open'` is unique per symbol: at
+-- most one open position per configured token at a time.
+CREATE TABLE IF NOT EXISTS paper_positions (
+  id                    TEXT    PRIMARY KEY,
+  symbol                TEXT    NOT NULL,
+  address               TEXT    NOT NULL,
+  pool_address          TEXT    NOT NULL,
+  status                TEXT    NOT NULL CHECK (status IN ('open', 'closed')),
+  entry_price           REAL    NOT NULL,
+  entry_timestamp       INTEGER NOT NULL,
+  original_size_raw     TEXT    NOT NULL,
+  remaining_size_raw    TEXT    NOT NULL,
+  size_decimals         INTEGER NOT NULL,
+  filled_tranche_count  INTEGER NOT NULL DEFAULT 0,
+  peak_price            REAL    NOT NULL,
+  trailing_armed        INTEGER NOT NULL DEFAULT 0,
+  stop_loss_price       REAL    NOT NULL,
+  closed_at             INTEGER,
+  ladder_config         TEXT    NOT NULL,   -- JSON: the ladder this position is running under
+  created_at            INTEGER NOT NULL,
+  updated_at            INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_positions_status ON paper_positions (status);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_paper_positions_open_symbol
+  ON paper_positions (symbol) WHERE status = 'open';
+
+-- Immutable record of every simulated fill — the entry AND every exit
+-- trigger (take-profit tranche, trailing, stop-loss, time). "This is the
+-- record I'll be reading": trigger reason, price, size, modelled cost, and
+-- a full snapshot of position state immediately after this fill.
+CREATE TABLE IF NOT EXISTS paper_fills (
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  position_id       TEXT    NOT NULL REFERENCES paper_positions(id),
+  kind              TEXT    NOT NULL CHECK (kind IN ('entry', 'take_profit', 'trailing', 'stop_loss', 'time')),
+  tranche_index     INTEGER,
+  trigger_price     REAL    NOT NULL,
+  fill_price        REAL    NOT NULL,
+  size_raw          TEXT    NOT NULL,
+  size_decimals     INTEGER NOT NULL,
+  gross_pnl_sol_raw TEXT,
+  dex_fee_sol_raw   TEXT    NOT NULL,
+  fixed_fee_sol_raw TEXT    NOT NULL,
+  net_pnl_sol_raw   TEXT,
+  position_snapshot TEXT    NOT NULL,   -- JSON, paper_positions-shaped, state AFTER this fill
+  filled_at         INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_fills_position ON paper_fills (position_id, filled_at);
+
+-- Operational events that are not fills: stale feed, feed error, malformed
+-- response, restart/resume. The audit trail for "did a simulated failure
+-- corrupt anything" — read this table, not just scrollback.
+CREATE TABLE IF NOT EXISTS paper_events (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  symbol      TEXT,
+  kind        TEXT    NOT NULL CHECK (kind IN ('stale_feed', 'feed_error', 'restart', 'resume', 'entry_skipped')),
+  detail      TEXT    NOT NULL,
+  occurred_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_paper_events_kind ON paper_events (kind, occurred_at);
