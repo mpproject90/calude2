@@ -1,6 +1,15 @@
 # Default configuration. Mode is deliberately `backtest` — spec §2.3 requires
 # every config file to default to a non-trading mode. Live also needs
 # LIVE_TRADING=true in the environment before it will arm.
+#
+# PHASE 2 PIVOT (DECISIONS §39/§40): `tokens[]` below is the phase-1
+# indicator-driven (RSI/MFI mean-reversion) config — REJECTED as a live-entry
+# hypothesis (DECISIONS's top section), kept only because data:fetch/
+# data:screen/backtest still read it. It is NOT the live entry path anymore.
+# `positions[]` — empty by default, add your own — is: manual token pick,
+# limit price, take-profit ladder. Run `npm run config:check` after editing
+# it; it prints every tranche's cost-preview numbers and rejects a ladder
+# whose economics don't clear (DECISIONS §40).
 
 global:
   mode: backtest
@@ -86,3 +95,29 @@ tokens:
       maxPctOfPoolLiquidity: 0.5
       cooldownCandlesAfterLoss: 24
       minViableBuyAmountSol: "0.05"
+
+# The live entry path (DECISIONS §39/§40). Example shape, commented out —
+# uncomment and edit, then run `npm run config:check` to see the cost preview
+# before using it:
+#
+# positions:
+#   - address: "<mint>"
+#     symbol: SYM
+#     buyAmountSol: "0.5"
+#     limitPrice: 0.80          # buys when observed price is at or below this
+#     ladder:
+#       tranches:
+#         - targetGainPct: 20     # sell 33% at +20%
+#           sellPct: 33
+#         - targetGainPct: 50     # sell another 33% at +50%
+#           sellPct: 33
+#         - targetGainPct: 100    # sell the last 34% at +100%
+#           sellPct: 34
+#       trailing:
+#         enabled: true
+#         trailPct: 15            # arms once the first tranche fills
+#       stopLossPct: 15
+#       timeExitMinutes: 4320     # 3 days
+#       minNetFloorPct: 5         # DECISIONS §40 — reject a tranche netting less than this
+#       maxFixedCostPctOfProceeds: 20   # DECISIONS §40 — reject a tranche too small for its own fixed fee
+positions: []
