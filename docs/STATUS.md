@@ -11,13 +11,15 @@ years of Binance-derived history, 356 pooled cross-ups), the resulting
 clustering was quantified and corrected for (§35: 137 effective at a 2-day
 decluster window), a baseline backtest ran on that pooled series at current
 settings (§36: 10 raw / 7 effective trades, far below the 50-trade
-minimum), and two follow-up diagnostics isolated cost from entry/exit
-quality (§37): **zero-cost expectancy is still negative, but MFE was real
-(avg 5.93% on the 8 time-exits) and the exit apparatus — no trailing stop,
-RSI-recovery never once fired — didn't capture it.** See "Cost/exit
-diagnostics" below. No parameters have been tuned anywhere in this project
-yet. Verified against `main` by clean clone and tree-versus-index diff
-after every push.
+minimum), and diagnostics isolated cost from entry/exit quality (§37: MFE
+was real but the exit apparatus didn't capture it) and then tested whether
+ANY reasonable exit fixes that (§38): **replayed the same 10 entries under
+5 exit rules — every alternative exit improved on control, but NONE
+crossed into positive expectancy, costed or zero-cost. Per the operator's
+own decision rule, this is decisive: the entry has no edge on this
+sample.** See "Cost/exit diagnostics" below. No parameters have been tuned
+anywhere in this project yet. Verified against `main` by clean clone and
+tree-versus-index diff after every push.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -571,6 +573,46 @@ small to trust either reading alone. Full per-trade table in DECISIONS §37.
 **Not concluded**: whether the entry signal has no edge, or the exit needs
 a trailing stop / shorter time cap / lower RSI-recovery level, or both —
 operator's call, not decided here.
+
+## MFE decay and exit-variant replay — none turned positive (§38)
+
+Two more diagnostics against the SAME 10 trades, no entry re-run, no
+tuning: does MFE decay within the 48-candle window, and does ANY
+reasonable exit turn this positive?
+
+**MFE decay**: for the 8 trades reaching bar 48, average MFE@24/MFE@48 =
+**96.05%**, median 100% — 7 of 8 had their final MFE fully in place by bar
+24; the back half of the 48-candle window added nothing for them. The one
+exception is RAY, the only net-positive trade in the baseline, whose MFE
+kept growing from 5.67% to 8.28% between bar 24 and 48. Independent of any
+trailing-stop question, the time exit looks longer than the move needs for
+most trades.
+
+**Exit variant replay** (`src/backtest/exitReplay.ts` — reuses the real
+`evaluateIntrabarStops`/`evaluateExit` unchanged; re-running the whole
+engine per variant was rejected because a different exit timing can
+silently change which trades exist. Control replay verified 10/10 against
+the real original trades before trusting the comparison):
+
+| Variant | Zero-cost exp (SOL) | Zero-cost win% |
+|---|---|---|
+| control (current) | -0.0269 | 20% |
+| trailing +3%/-2% | -0.0117 | 50% |
+| trailing +5%/-3% | -0.0116 | 50% |
+| take-profit +5% | -0.0081 | 50% |
+| take-profit +8% | -0.0120 | 40% |
+
+**0 of 4 alternative exits turn positive, costed or zero-cost.** Per the
+operator's own decision rule stated in advance ("if none do, that's
+decisive — the entry has no edge and we stop"): **this baseline sample is
+decisive.** Every alternative exit is a real improvement over control
+(zero-cost expectancy roughly halves or better; win rate roughly doubles
+on the trailing variants) — the exit WAS meaningfully miscalibrated, as
+§37 suggested — but none crosses zero. N=7 effective; RAY's single trade
+carries real weight in either direction. Full detail in DECISIONS §38.
+
+**No code or config was changed to the live strategy to produce this —
+`replayExit` is a standalone diagnostic with no schema field.**
 
 ## What is deliberately NOT built
 

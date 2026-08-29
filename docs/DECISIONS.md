@@ -1509,3 +1509,86 @@ stop or a shorter time cap or a lower RSI-recovery level, or both. That is
 the operator's call, informed by both diagnostics together, not either one
 in isolation. No parameter was changed to produce either number in this
 section.
+
+## 38. MFE decay and exit-variant replay: none turned positive — decisive per the operator's own rule
+
+**Operator direction:** §37 showed the exit apparatus wasn't capturing real
+MFE (avg 5.93% on 8 time-exits, zero RSI-recovery exits). Two more
+diagnostics before any decision, both against the SAME 10 trades, no entry
+re-run, no tuning: (1) does MFE decay within the 48-candle window — was most
+of it visible by bar 24? (2) replay the 10 known entries under alternative
+exit rules — does ANY reasonable exit turn this positive?
+
+**Built `replayExit`/`mfeWithinBars`** (`src/backtest/exitReplay.ts`).
+Re-running `runBacktest` per exit variant was rejected: entry evaluation
+only resumes once a position closes, so a different exit timing can
+silently add or remove trades (an earlier exit frees up bars the original
+run's scan never saw as flat) — a different, uncontrolled comparison, not
+"same 10 trades, different exit." Instead, `replayExit` takes a KNOWN
+(entryIndex, entryPrice) and walks the same candle path forward under a
+different rule, reusing the real `evaluateIntrabarStops`/`evaluateExit`
+unchanged for stop-loss/trailing/RSI-recovery/time; fixed take-profit
+(no schema field — diagnostic only, not a new feature) is added as an
+intrabar check at the same priority tier as trailing. **Verified, not
+assumed**: the control variant's replay was checked against the actual
+original 10 trades before trusting any comparison — 10/10 matched exactly
+(exitIndex, exitReason, exitPrice all identical).
+
+**1. MFE decay — 24-candle mark vs 48-candle mark**, computed only for the
+8 trades that actually reached bar 48 (the 2 stop-loss trades are flagged
+N/A rather than extrapolated past their real exit — that answers a
+different, unasked question):
+
+| Token | Bars held | MFE@24% | MFE@48% | Fraction |
+|---|---|---|---|---|
+| JTO | 48 | 10.69 | 10.69 | 100% |
+| PYTH | 48 | 2.38 | 2.38 | 100% |
+| WIF | 48 | 2.61 | 2.61 | 100% |
+| JTO | 48 | 2.07 | 2.07 | 100% |
+| JTO | 48 | 8.63 | 8.63 | 100% |
+| RAY | 48 | 5.67 | 8.28 | 68% |
+| PYTH | 48 | 1.01 | 1.01 | 100% |
+| WIF | 48 | 11.79 | 11.79 | 100% |
+
+**Average MFE@24/MFE@48 = 96.05%, median = 100%.** 7 of 8 trades had their
+final MFE already fully in place by bar 24 — the back half of the
+48-candle window added nothing for them. The one exception is RAY, the
+single overall net-positive trade in the whole baseline, where MFE kept
+growing from 5.67% to 8.28% between bar 24 and 48 — worth naming
+explicitly since one trade's behavior carries real weight at N=7 effective.
+**Independent of any trailing-stop question, the 48-candle time exit looks
+longer than the move needs for most of these trades.**
+
+**2. Exit variant replay — control plus 4 alternatives, costed and
+zero-cost expectancy for each:**
+
+| Variant | Costed exp (SOL) | Zero-cost exp (SOL) | Costed win% | Zero-cost win% | Exit reasons |
+|---|---|---|---|---|---|
+| control (current) | -0.0406 | -0.0269 | 10% | 20% | time=8, stop_loss=2 |
+| trailing +3%/-2% | -0.0254 | -0.0117 | 20% | 50% | trailing=5, time=4, stop_loss=1 |
+| trailing +5%/-3% | -0.0253 | -0.0116 | 20% | 50% | trailing=5, time=4, stop_loss=1 |
+| take-profit +5% | -0.0218 | -0.0081 | 50% | 50% | take_profit=5, time=4, stop_loss=1 |
+| take-profit +8% | -0.0257 | -0.0120 | 40% | 40% | take_profit=4, stop_loss=2, time=4 |
+
+**0 of 4 alternative exits turn positive, costed or zero-cost.** Per the
+operator's own decision rule stated in advance: **this is decisive — none
+positive means the entry has no edge, independent of exit design.**
+
+**Stated plainly, not hidden**: every alternative exit is a real,
+consistent IMPROVEMENT over control (zero-cost expectancy roughly halves
+or better: -0.0269 → -0.0081 at best), and win rate roughly doubles on the
+trailing variants and matches at take-profit +5%. The exit WAS
+meaningfully miscalibrated, exactly as §37's MFE evidence suggested — a
+better exit captures real gains that were being given back. But better is
+not positive: none of the 5 variants (including control) cross zero. At
+N=7 effective, this is not proof no exit could ever work, and RAY's single
+trade (the only one whose MFE kept growing past bar 24) is doing real work
+in whichever direction it lands — but per the operator's own weaker
+question ("does ANY reasonable exit turn this positive, or does none"),
+the answer on this specific 10-trade sample is **none**.
+
+**No parameter was tuned or changed in the live strategy to produce this
+section** — `replayExit` is a standalone diagnostic module with no schema
+field, not a modification to `rules/exit.ts` or `config/default.yaml`.
+Decision on whether this baseline stops the strategy or proceeds to a
+sweep is the operator's, not made here.
