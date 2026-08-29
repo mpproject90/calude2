@@ -6,6 +6,8 @@ import { runBacktest, type ClosedBacktestTrade } from '../src/backtest/engine.js
 import { computeSampleMetrics, computeBacktestMetrics, withZeroCosts } from '../src/backtest/metrics.js';
 import { computeEntryFunnel } from '../src/backtest/funnel.js';
 import { decluster, declusterAtWindows, type ClusterableEvent } from '../src/backtest/decluster.js';
+import { replayExit, mfeWithinBars, type ExitVariant } from '../src/backtest/exitReplay.js';
+import type { IndicatorValue } from '../src/types/index.js';
 import { parseConfig } from '../src/config/load.js';
 import type { Config, TokenConfig } from '../src/config/schema.js';
 import { computeRsi } from '../src/indicators/rsi.js';
@@ -608,5 +610,122 @@ describe('event declustering (DECISIONS §35)', () => {
     expect(w1!.rawEventCount).toBe(6);
     expect(w1!.effectiveCount).toBe(3);
     expect(w1!.threePlusTokenClusters).toBe(1);
+  });
+});
+
+describe('exit replay (DECISIONS §38) — alternative exits on known entries, no re-run of entry logic', () => {
+  const template = buildConfig().tokens[0]!;
+  const flatRsi = (n: number): IndicatorValue[] => Array.from({ length: n }, () => ({ value: 50, reliable: true }));
+  const bar = (i: number, o: Partial<Candle> = {}): Candle => ({
+    timestamp: T0 + i * H, open: 100, high: 105, low: 95, close: 100, volume: 1000, ...o,
+  });
+  const CONTROL: ExitVariant = {
+    label: 'control', stopLossPct: 15, timeExitCandles: 48, rsiExitLevel: 70,
+    trailing: { enabled: false, activateAtPct: 20, trailPct: 10 }, takeProfitPct: null,
+  };
+
+  it('reproduces a stop-loss exit identically to the real control rules', () => {
+    const candles = [
+      bar(0, { close: 100 }),
+      bar(1, { low: 80, close: 82 }),          // breaches the 85 stop intrabar
+      ...Array.from({ length: 46 }, (_, i) => bar(i + 2)),
+    ];
+    const rsi = flatRsi(candles.length);
+    const r = replayExit(candles, rsi, 0, 100, template, CONTROL, 0.5);
+    expect(r.exitIndex).toBe(1);
+    expect(r.exitReason).toBe('stop_loss');
+    expect(r.exitPrice).toBeCloseTo(85 * (1 - 0.5 / 100), 6);
+    expect(r.barsHeld).toBe(1);
+  });
+
+  it('reproduces a time exit when nothing else triggers', () => {
+    const candles = [bar(0, { close: 100 }), ...Array.from({ length: 48 }, (_, i) => bar(i + 1, { close: 101 }))];
+    const rsi = flatRsi(candles.length);
+    const r = replayExit(candles, rsi, 0, 100, template, CONTROL, 0.5);
+    expect(r.exitReason).toBe('time');
+    expect(r.barsHeld).toBe(48);
+    expect(r.exitPrice).toBe(101);
+  });
+
+  it('fires a trailing stop after activation once price retreats by trailPct from the peak', () => {
+    const variant: ExitVariant = { ...CONTROL, trailing: { enabled: true, activateAtPct: 3, trailPct: 2 } };
+    const candles = [
+      bar(0, { close: 100 }),
+      bar(1, { high: 106, low: 105, close: 105 }),   // peak 106 -> activates (gain 6% >= 3%)
+      bar(2, { high: 106, low: 103.8, close: 104 }), // trail = 106*0.98=103.88, low 103.8 breaches
+      ...Array.from({ length: 45 }, (_, i) => bar(i + 3)),
+    ];
+    const rsi = flatRsi(candles.length);
+    const r = replayExit(candles, rsi, 0, 100, template, variant, 0);
+    expect(r.exitIndex).toBe(2);
+    expect(r.exitReason).toBe('trailing');
+    expect(r.exitPrice).toBeCloseTo(103.88, 6);
+  });
+
+  it('fires a fixed take-profit the first bar the high reaches the target', () => {
+    const variant: ExitVariant = { ...CONTROL, takeProfitPct: 5 };
+    const candles = [
+      bar(0, { close: 100 }),
+      bar(1, { high: 104, low: 99, close: 103 }),   // below the 105 target
+      bar(2, { high: 106, low: 102, close: 105 }),  // reaches 105 intrabar
+      ...Array.from({ length: 45 }, (_, i) => bar(i + 3)),
+    ];
+    const rsi = flatRsi(candles.length);
+    const r = replayExit(candles, rsi, 0, 100, template, variant, 0);
+    expect(r.exitIndex).toBe(2);
+    expect(r.exitReason).toBe('take_profit');
+    expect(r.exitPrice).toBeCloseTo(105, 6);
+  });
+
+  it('a same-bar stop-loss beats a same-bar take-profit — conservative ordering', () => {
+    const variant: ExitVariant = { ...CONTROL, takeProfitPct: 5 };
+    const candles = [
+      bar(0, { close: 100 }),
+      bar(1, { high: 106, low: 80, close: 90 }),   // both the 85 stop and the 105 target touched in one bar
+      ...Array.from({ length: 46 }, (_, i) => bar(i + 2)),
+    ];
+    const rsi = flatRsi(candles.length);
+    const r = replayExit(candles, rsi, 0, 100, template, variant, 0);
+    expect(r.exitReason).toBe('stop_loss');
+  });
+
+  it('RSI-recovery still fires when no stop, trailing or take-profit triggered', () => {
+    const candles = [
+      bar(0, { close: 100 }), bar(1, { close: 101 }),
+      ...Array.from({ length: 46 }, (_, i) => bar(i + 2, { close: 101 })),
+    ];
+    const rsi: IndicatorValue[] = candles.map((_, i) => ({ value: i === 1 ? 75 : 50, reliable: true }));
+    const r = replayExit(candles, rsi, 0, 100, template, CONTROL, 0);
+    expect(r.exitIndex).toBe(1);
+    expect(r.exitReason).toBe('rsi_recovery');
+  });
+
+  it('caps every variant at the same time-exit ceiling regardless of trailing/take-profit config', () => {
+    const variant: ExitVariant = { ...CONTROL, takeProfitPct: 50, timeExitCandles: 5 };   // target never reached
+    const candles = Array.from({ length: 10 }, (_, i) => bar(i));
+    const rsi = flatRsi(candles.length);
+    const r = replayExit(candles, rsi, 0, 100, template, variant, 0);
+    expect(r.exitReason).toBe('time');
+    expect(r.barsHeld).toBe(5);
+  });
+});
+
+describe('mfeWithinBars (DECISIONS §38)', () => {
+  const bar = (i: number, high: number): Candle => ({ timestamp: T0 + i * H, open: high, high, low: high, close: high, volume: 1000 });
+
+  it('finds the peak high within the window, not beyond it', () => {
+    const candles = [bar(0, 100), bar(1, 110), bar(2, 130), bar(3, 105), bar(4, 200)];
+    expect(mfeWithinBars(candles, 0, 100, 3)).toBeCloseTo(30, 10);    // peak 130 within bars 1-3
+    expect(mfeWithinBars(candles, 0, 100, 4)).toBeCloseTo(100, 10);   // peak 200 within bars 1-4
+  });
+
+  it('never looks at the entry bar itself, only bars after it', () => {
+    const candles = [bar(0, 500), bar(1, 100), bar(2, 100)];
+    expect(mfeWithinBars(candles, 0, 100, 2)).toBeCloseTo(0, 10);   // entry bar's high (500) must not count
+  });
+
+  it('caps at available data when withinBars exceeds the series length', () => {
+    const candles = [bar(0, 100), bar(1, 110)];
+    expect(mfeWithinBars(candles, 0, 100, 48)).toBeCloseTo(10, 10);
   });
 });
