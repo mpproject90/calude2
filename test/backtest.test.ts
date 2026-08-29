@@ -5,6 +5,7 @@ import { regimeBucketIndices } from '../src/backtest/regimeAlignment.js';
 import { runBacktest, type ClosedBacktestTrade } from '../src/backtest/engine.js';
 import { computeSampleMetrics, computeBacktestMetrics } from '../src/backtest/metrics.js';
 import { computeEntryFunnel } from '../src/backtest/funnel.js';
+import { decluster, declusterAtWindows, type ClusterableEvent } from '../src/backtest/decluster.js';
 import { parseConfig } from '../src/config/load.js';
 import type { Config, TokenConfig } from '../src/config/schema.js';
 import { computeRsi } from '../src/indicators/rsi.js';
@@ -490,5 +491,77 @@ describe('entry funnel (DECISIONS §32) — no backtest, just condition counts',
     expect(withGapResult.gaps).toBe(1);
     expect(withoutGapResult.gaps).toBe(0);
     expect(withGapResult.longestReliableStretch).toBeLessThan(withoutGapResult.longestReliableStretch);
+  });
+});
+
+describe('event declustering (DECISIONS §35)', () => {
+  const DAY = 86_400_000;
+  const ev = (token: string, dayOffset: number): ClusterableEvent => ({ token, timestamp: dayOffset * DAY });
+
+  it('leaves far-apart events as singleton clusters', () => {
+    const events = [ev('A', 0), ev('B', 10), ev('C', 20)];
+    const clusters = decluster(events, 1 * DAY);
+    expect(clusters).toHaveLength(3);
+    expect(clusters.every((c) => c.events.length === 1)).toBe(true);
+  });
+
+  it('merges events within the window into one cluster', () => {
+    const events = [ev('A', 0), ev('B', 0.5), ev('C', 0.9)];
+    const clusters = decluster(events, 1 * DAY);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]!.events).toHaveLength(3);
+    expect(clusters[0]!.distinctTokens).toBe(3);
+  });
+
+  it('chains: a cluster can span more than one window if events keep arriving inside it', () => {
+    // Each gap is 0.9 days (< 1 day window), but three gaps span 2.7 days total.
+    const events = [ev('A', 0), ev('B', 0.9), ev('C', 1.8), ev('D', 2.7)];
+    const clusters = decluster(events, 1 * DAY);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]!.events).toHaveLength(4);
+    expect(clusters[0]!.endTimestamp - clusters[0]!.startTimestamp).toBe(2.7 * DAY);
+  });
+
+  it('splits into two clusters once a gap exceeds the window', () => {
+    const events = [ev('A', 0), ev('B', 0.5), ev('C', 5), ev('D', 5.4)];
+    const clusters = decluster(events, 1 * DAY);
+    expect(clusters).toHaveLength(2);
+    expect(clusters[0]!.events).toHaveLength(2);
+    expect(clusters[1]!.events).toHaveLength(2);
+  });
+
+  it('counts distinct tokens per cluster, not raw event count', () => {
+    const events = [ev('A', 0), ev('A', 0.1), ev('A', 0.2)];   // same token, repeated
+    const clusters = decluster(events, 1 * DAY);
+    expect(clusters).toHaveLength(1);
+    expect(clusters[0]!.events).toHaveLength(3);
+    expect(clusters[0]!.distinctTokens).toBe(1);
+  });
+
+  it('sorts out-of-order input before declustering', () => {
+    const events = [ev('C', 5), ev('A', 0), ev('B', 0.5)];
+    const clusters = decluster(events, 1 * DAY);
+    expect(clusters).toHaveLength(2);
+    expect(clusters[0]!.events.map((e) => e.token)).toEqual(['A', 'B']);
+  });
+
+  it('a wider window never produces MORE effective clusters than a narrower one', () => {
+    const events = [ev('A', 0), ev('B', 1.5), ev('C', 4), ev('D', 4.5), ev('E', 9)];
+    const summaries = declusterAtWindows(events, [1, 2, 3, 7]);
+    for (let i = 1; i < summaries.length; i++) {
+      expect(summaries[i]!.effectiveCount).toBeLessThanOrEqual(summaries[i - 1]!.effectiveCount);
+    }
+  });
+
+  it('reports raw count and 3+ distinct-token clusters at each window', () => {
+    const events = [
+      ev('A', 0), ev('B', 0.1), ev('C', 0.2),   // 3-token cluster, day 0
+      ev('A', 10), ev('B', 10.1),               // 2-token cluster, day 10
+      ev('D', 20),                              // singleton, day 20
+    ];
+    const [w1] = declusterAtWindows(events, [1]);
+    expect(w1!.rawEventCount).toBe(6);
+    expect(w1!.effectiveCount).toBe(3);
+    expect(w1!.threePlusTokenClusters).toBe(1);
   });
 });
