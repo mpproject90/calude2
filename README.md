@@ -114,10 +114,13 @@ What to scrutinise:
 - **Pool dominance migration** — if reported, review which pool traded when
   before trusting the series; the tool does not resolve this for you.
 - **Wick/ATR diagnostics** (GeckoTerminal path only, replaces range widening —
-  DECISIONS §23) — the wick-to-body ratio distribution and the count of bars
-  whose high/low sits more than 3× ATR(14) outside the open-close body. This is
-  real pool OHLC, so a bad number here means thin-liquidity noise (a wash trade
-  or one oversized swap), not a synthesis artifact — different cause, same
+  DECISIONS §23, §26) — wick size as a percentage of price, and the count of
+  bars whose high/low sits more than 3× ATR(14) outside the open-close body.
+  (An earlier wick-to-BODY ratio was wrong: neither MFI nor ATR reads the
+  candle body, and dividing by it blew up on the ~20% of bars where price ends
+  the hour where it started — see DECISIONS §26.) This is real pool OHLC, so a
+  bad ATR-outlier number means thin-liquidity noise (a wash trade or one
+  oversized swap), not a synthesis artifact — different cause, same
   "review before trusting MFI/ATR on this token" conclusion.
 - **Range widening** (Binance path only) — how much wider the synthesized
   high/low is than `|close − open|`. If large, **build the 1m-aggregated path

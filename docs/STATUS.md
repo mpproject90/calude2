@@ -181,28 +181,42 @@ conclusion.**
 | Gaps | 150 (189 bars missing) | 0 |
 | Rejected candles | 0 | 0 |
 | Dominance migration | YES — 3 periods: the selected pool led 2026-05-31 to 2026-06-19, a different pool (`HdsFGjjY46twFKjqHqUyT2bnRS4XCo1HaExts5CSNprU`, also meteora) led for one day (2026-06-20), then the selected pool resumed 2026-06-21 to 2026-08-29 | not reported (single dominant pool throughout) |
-| Wick:body ratio p50/p90/p99/max | 1.00 / 127.17 / 1,056,450.59 / ∞ | not computed (reference series only) |
-| All-wick (zero-body) bars | 2 of 1972 | — |
+| Wick:body ratio p50/p90/p99/max (OLD formula, see below) | 1.00 / 127.17 / 1,056,450.59 / ∞ | not computed (reference series only) |
+| All-wick (zero-body) bars (OLD formula) | 2 of 1972 | — |
 | ATR-outlier bars (>3× ATR(14)) | 1 of 1875 judged (97 still in ATR warm-up) | — |
 
-**What stands out, flagged for operator review, not resolved here:**
+**Two items investigated and resolved (operator-directed follow-up, evidence
+in DECISIONS §26 and this session's transcript):**
 
-- **JUP/SOL's 91.25% coverage (189 missing bars) is not explained by pool
-  age** — the selected pool was created 2024-03-19, well before this 90-day
-  window, so this isn't the "young pool" case the data-review checklist above
-  expects to explain low coverage. Either the pool went quiet for real
-  stretches, or there's an interval-alignment issue worth checking against
-  `data/raw-sample.json`.
+- **The 189 missing bars are a genuinely quiet pool, not a bug.** Mostly
+  single-bar gaps (119 of 150), clustered on weekends (Sat+Sun account for 75
+  of 189 missing bars vs. 16-28/day on weekdays), with neighboring bars
+  running at 62-65% of the series' typical volume. Five gap timestamps were
+  cross-checked directly against the verbatim `data/raw-sample.json` API
+  response: all five are genuinely absent from what the API returned, with
+  their immediate neighbors present in the same response — ruling out both an
+  API drop and a client-side pagination bug. SOL/USDC's 100% coverage over
+  the identical window, same code path, is the control showing this isn't
+  systemic.
+- **The wick:body p99/max were a diagnostic bug, not a data problem — fixed
+  in DECISIONS §26.** Every top-ratio bar had open and close agreeing to
+  12-15 significant digits (floating-point rounding noise, not a real price
+  difference), and the wicks themselves were an ordinary 0.3-2% of price.
+  Dividing by a near-zero body produced ratios in the hundreds of millions for
+  unremarkable wicks. The original premise was also wrong: neither MFI
+  (typical price, uses H/L/C) nor ATR (true range, uses H/L/prevClose) reads
+  the candle body, so body size was never the right thing to worry about.
+  `computeWickDiagnostics` now reports wick size as a percentage of price —
+  see `wickToPricePct` in `src/data/wickDiagnostics.ts`. The table above keeps
+  the old numbers as the historical record of what prompted the fix, not as a
+  current reading.
+
+**Still open, deliberately deferred — does not block step 6, per the
+operator:**
+
 - **The one-day dominance shift to `HdsFGjjY...` on 2026-06-20** is a real,
   reported migration, not noise (DECISIONS §25 fixed the false-positive
-  version of this). Worth a look at what happened to the selected pool's
-  liquidity/volume that day.
-- **The wick:body p99 of ~1.06 million** is a large jump from p90's 127 —
-  consistent with one or two bars having a body so close to zero that even a
-  modest real wick produces an enormous (but finite, not `Infinity`) ratio.
-  Only 2 bars are flagged fully all-wick; this suggests a handful more sit
-  just short of that. Worth inspecting which bars these are before trusting
-  MFI/ATR on them.
+  version of this).
 - **One of JUP/SOL's 5 candidate pools (`C1MgLojNLWBKADvu9BHdtgzz1oZX4dZ5zGdGcgvvW8Wz`,
   orca) failed with a persistent 429 and was excluded from selection**
   (DECISIONS §24) — it holds real volume share (~34% in the first, partial
@@ -214,6 +228,11 @@ conclusion.**
 `data/raw-sample.json` was written on the fixed run and is available locally
 (gitignored, not in this repo) for inspecting the exact bars behind any of
 the above.
+
+**Operator decision: step 6 is unblocked.** 0 rejected candles, gaps real and
+explained (flagged not interpolated, never traversed silently), 1 ATR-outlier
+bar in 1875, SOL/USDC reference at 100% coverage. Proceeding to build the
+backtest engine — see "What is built" below for progress.
 
 ## What is deliberately NOT built
 

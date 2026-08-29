@@ -721,41 +721,42 @@ describe('pool selection', () => {
 });
 
 describe('wick/ATR diagnostics — the replacement for range-widening on real pool data', () => {
-  it('computes the wick-to-body ratio correctly for an ordinary two-sided-wick bar', () => {
-    // open=10, close=12 -> body=2; high=14 -> upper wick=14-12=2;
-    // low=8 -> lower wick=10-8=2. total wick=4, ratio=4/2=2 (hand-computed).
+  it('computes wick size as a percentage of price for an ordinary two-sided-wick bar', () => {
+    // open=10, close=12 -> price=(10+12)/2=11; high=14 -> upper wick=14-12=2;
+    // low=8 -> lower wick=10-8=2. total wick=4, pct=4/11*100 (hand-computed).
     const d = computeWickDiagnostics([
       { timestamp: T0, open: 10, high: 14, low: 8, close: 12, volume: 100 },
     ]);
     expect(d.bars).toBe(1);
-    expect(d.wickToBody.p50).toBeCloseTo(2, 10);
-    expect(d.wickToBody.max).toBeCloseTo(2, 10);
-    expect(d.wickToBody.infiniteCount).toBe(0);
+    expect(d.wickToPricePct.p50).toBeCloseTo((4 / 11) * 100, 10);
+    expect(d.wickToPricePct.max).toBeCloseTo((4 / 11) * 100, 10);
   });
 
   it('sums asymmetric upper and lower wicks rather than only counting one side', () => {
-    // open=10, close=11 -> body=1; high=13 -> upper wick=13-11=2;
-    // low=9.5 -> lower wick=10-9.5=0.5. total wick=2.5, ratio=2.5/1=2.5.
+    // open=10, close=11 -> price=10.5; high=13 -> upper wick=13-11=2;
+    // low=9.5 -> lower wick=10-9.5=0.5. total wick=2.5, pct=2.5/10.5*100.
     const d = computeWickDiagnostics([
       { timestamp: T0, open: 10, high: 13, low: 9.5, close: 11, volume: 100 },
     ]);
-    expect(d.wickToBody.p50).toBeCloseTo(2.5, 10);
+    expect(d.wickToPricePct.p50).toBeCloseTo((2.5 / 10.5) * 100, 10);
   });
 
-  it('flags an all-wick (zero-body) bar as an infinite ratio rather than clipping it', () => {
+  it('reports a real percentage for a zero-body bar instead of an unusable Infinity', () => {
+    // The exact case that broke the old body-ratio formula (DECISIONS §26):
+    // open===close, but there was still real intrabar range. price=10;
+    // wick=2+2=4; pct=40%, not Infinity — a comparable, finite number.
     const d = computeWickDiagnostics([
       { timestamp: T0, open: 10, high: 12, low: 8, close: 10, volume: 100 },
     ]);
-    expect(d.wickToBody.infiniteCount).toBe(1);
-    expect(d.wickToBody.max).toBe(Infinity);
+    expect(d.wickToPricePct.p50).toBeCloseTo(40, 10);
+    expect(Number.isFinite(d.wickToPricePct.max)).toBe(true);
   });
 
-  it('reports zero wick-to-body ratio for a body-filling bar with no excursion', () => {
+  it('reports zero wick percentage for a body-filling bar with no excursion', () => {
     const d = computeWickDiagnostics([
       { timestamp: T0, open: 10, high: 11, low: 10, close: 11, volume: 100 },
     ]);
-    expect(d.wickToBody.p50).toBe(0);
-    expect(d.wickToBody.infiniteCount).toBe(0);
+    expect(d.wickToPricePct.p50).toBe(0);
   });
 
   it('flags a bar whose wick sits far outside its own recent ATR as an outlier', () => {

@@ -252,10 +252,9 @@ async function runGeckoTerminal(): Promise<void> {
     console.log(`SOL/USDC selected pool: ${solPool ?? 'NONE — no pool traded in this window'}`);
 
     const wick = computeWickDiagnostics(tokenCandles);
-    console.log(`\n${symbol}/SOL wick/ATR diagnostics — the range-widening replacement (DECISIONS §23):`);
-    console.log(`  bars                        ${wick.bars}`);
-    console.log(`  wick:body p50/p90/p99/max   ${fmt(wick.wickToBody.p50)} / ${fmt(wick.wickToBody.p90)} / ${fmt(wick.wickToBody.p99)} / ${fmt(wick.wickToBody.max)}`);
-    console.log(`  all-wick (zero-body) bars   ${wick.wickToBody.infiniteCount}`);
+    console.log(`\n${symbol}/SOL wick/ATR diagnostics — the range-widening replacement (DECISIONS §23, §26):`);
+    console.log(`  bars                          ${wick.bars}`);
+    console.log(`  wick % of price p50/p90/p99/max   ${fmt(wick.wickToPricePct.p50)}% / ${fmt(wick.wickToPricePct.p90)}% / ${fmt(wick.wickToPricePct.p99)}% / ${fmt(wick.wickToPricePct.max)}%`);
     console.log(
       `  ATR-outlier bars (>${wick.atrOutlierMultiple}x ATR(14) outside the body)   ${wick.atrOutlierCount} of ` +
       `${wick.bars - wick.atrUnreliableCount} judged (${wick.atrUnreliableCount} still in ATR warm-up)`,

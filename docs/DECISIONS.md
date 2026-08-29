@@ -667,3 +667,46 @@ bucket, never flagged" — a safe default (under-reporting on a report, not a
 trading decision) but not necessarily the most useful one for a short window.
 Revisit if a short-window fetch needs finer migration resolution than this
 gives it.
+
+## 26. Wick diagnostic reworked: percentage of price, not ratio to body
+
+**The operator asked for evidence, not a fix, on why the wick:body p99
+(~1.06 million) was so extreme.** The investigation (querying the cached
+candles and cross-referencing `data/raw-sample.json` directly) found that
+every top-ratio bar had `open` and `close` agreeing to 12-15 significant
+digits — floating-point rounding noise, not a real price difference — and
+that the wicks themselves were an ordinary 0.3-2% of price. The ratio only
+looked catastrophic because §23's formula divided by a body that should have
+been exactly zero and wasn't, quite.
+
+**The premise behind the original formula was also wrong, independent of the
+floating-point issue.** §23 built the wick:body ratio on the assumption that a
+small body meant MFI's and ATR's inputs were compromised. Neither indicator
+reads the candle body: ATR is true range, computed from high/low/previous
+close (`indicators/atr.ts`); MFI's typical price is `(H+L+C)/3`
+(`indicators/mfi.ts`). A tiny body just means price ended the hour where it
+started — normal, especially for a token that isn't moving much that hour —
+and says nothing about whether the high/low extremes are trustworthy, which
+is the actual question this diagnostic exists to answer.
+
+On the real JUP/SOL data reviewed, 416 of 1972 bars (21%) had a body under
+0.1% of price. Read through the old (wrong) lens, "hundreds of tiny-body
+bars" looked like a reliability problem for the indicators. It wasn't — it
+was hundreds of ordinary quiet-hour bars being fed into a ratio formula that
+is numerically unstable whenever its denominator is small, which for this
+kind of formula is often.
+
+**Decision:** `computeWickDiagnostics` (`src/data/wickDiagnostics.ts`) now
+reports **wick size as a percentage of price** —
+`(upperWick + lowerWick) / ((open + close) / 2) * 100` — instead of a ratio to
+body. Every bar gets a real, comparable, finite number; there is no `Infinity`
+case left to special-case, because the denominator (price) is never routinely
+near zero the way body is. The **ATR-outlier count is unchanged** — it was
+never body-dependent, and on the same real data it was the genuinely useful
+signal (1 outlier in 1875 judged bars, a clean result) while the wick:body
+ratio was noise dressed up as a finding.
+
+**Consequence for the operator's step 6 decision:** the wick:body p99 that
+originally looked alarming is not evidence against trusting MFI/ATR on this
+token. Whatever concern remains rests on the ATR-outlier count, which was
+already clean.
