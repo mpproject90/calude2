@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { openDb } from '../src/db/index.js';
 import type { Candle } from '../src/types/index.js';
 import { validateCandle, validateCandles } from '../src/data/validate.js';
@@ -19,6 +19,13 @@ import {
 } from '../src/data/providers/dexpaprika.js';
 import { selectDominantPool, type PoolSeries } from '../src/data/poolSelection.js';
 import { computeWickDiagnostics } from '../src/data/wickDiagnostics.js';
+import {
+  BinanceHistoricalCandleProvider, BinanceHistoricalProviderError, type FetchFn as BhFetchFn,
+} from '../src/data/providers/binanceHistorical.js';
+import { zipSync, strToU8 } from 'fflate';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 const H = 3_600_000;
 const T0 = 1_700_000_000_000 - (1_700_000_000_000 % H);   // aligned to the hour
@@ -807,5 +814,138 @@ describe('wick/ATR diagnostics — the replacement for range-widening on real po
     const d = computeWickDiagnostics(short, { atrPeriod: 14 });
     expect(d.atrOutlierCount).toBe(0);
     expect(d.atrUnreliableCount).toBe(5);
+  });
+});
+
+describe('Binance historical (data.binance.vision) provider — DECISIONS §33', () => {
+  const zipOf = (filename: string, csv: string): Uint8Array => zipSync({ [filename]: strToU8(csv) });
+
+  const listingXml = (symbol: string, interval: string, months: string[], truncated = false): string =>
+    `<?xml version="1.0"?><ListBucketResult>` +
+    `<IsTruncated>${truncated}</IsTruncated>` +
+    months.map((m) =>
+      `<Contents><Key>data/spot/monthly/klines/${symbol}/${interval}/${symbol}-${interval}-${m}.zip</Key></Contents>` +
+      `<Contents><Key>data/spot/monthly/klines/${symbol}/${interval}/${symbol}-${interval}-${m}.zip.CHECKSUM</Key></Contents>`,
+    ).join('') +
+    `</ListBucketResult>`;
+
+  // Jan 2024, hourly, UTC-aligned.
+  const JAN0 = Date.UTC(2024, 0, 1, 0, 0, 0);
+  const msRow = (i: number, close = 100): string =>
+    `${JAN0 + i * H},99,101,98,${close},1000,${JAN0 + i * H + H - 1},99000,10,500,49500,0`;
+  // Same instants, expressed the way Binance emits them from 2025-01 onward (µs).
+  const usRow = (i: number, close = 100): string =>
+    `${(JAN0 + i * H) * 1000},99,101,98,${close},1000,${(JAN0 + i * H + H - 1) * 1000},99000,10,500,49500,0`;
+
+  function mockFetch(routes: Record<string, { status?: number; text?: string; zip?: Uint8Array }>): {
+    fetchFn: BhFetchFn; calls: string[];
+  } {
+    const calls: string[] = [];
+    const fetchFn: BhFetchFn = async (url) => {
+      calls.push(url);
+      const key = Object.keys(routes).find((k) => url.includes(k));
+      if (key === undefined) return { ok: false, status: 404, arrayBuffer: async () => new ArrayBuffer(0), text: async () => 'not found' };
+      const r = routes[key]!;
+      const status = r.status ?? 200;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        text: async () => r.text ?? '',
+        arrayBuffer: async () => (r.zip ?? new Uint8Array()).buffer as ArrayBuffer,
+      };
+    };
+    return { fetchFn, calls };
+  }
+
+  let cacheDir: string;
+  beforeEach(() => { cacheDir = mkdtempSync(join(tmpdir(), 'bh-provider-test-')); });
+  afterEach(() => { rmSync(cacheDir, { recursive: true, force: true }); });
+
+  const provider = (fetchFn: BhFetchFn, over: Partial<import('../src/data/providers/binanceHistorical.js').BinanceHistoricalOptions> = {}) =>
+    new BinanceHistoricalCandleProvider({
+      symbolMap: { SOL: 'SOLUSDT' }, cacheDir, fetchFn, ...over,
+    });
+
+  it('downloads, unzips and parses a monthly archive of millisecond-timestamp rows', async () => {
+    const csv = [msRow(0, 100), msRow(1, 101), msRow(2, 102)].join('\n');
+    const { fetchFn } = mockFetch({ 'SOLUSDT-1h-2024-01.zip': { zip: zipOf('SOLUSDT-1h-2024-01.csv', csv) } });
+    const out = await provider(fetchFn).getCandles('SOL', '1h', JAN0, JAN0 + 2 * H);
+    expect(out).toHaveLength(3);
+    expect(out[0]).toEqual({ timestamp: JAN0, open: 99, high: 101, low: 98, close: 100, volume: 1000 });
+    expect(out[2]!.close).toBe(102);
+  });
+
+  it('normalizes microsecond timestamps (2025-01+ archive format) back to milliseconds', async () => {
+    const csv = [usRow(0, 100), usRow(1, 101)].join('\n');
+    const { fetchFn } = mockFetch({ 'SOLUSDT-1h-2024-01.zip': { zip: zipOf('SOLUSDT-1h-2024-01.csv', csv) } });
+    const out = await provider(fetchFn).getCandles('SOL', '1h', JAN0, JAN0 + H);
+    expect(out[0]!.timestamp).toBe(JAN0);
+    expect(out[1]!.timestamp).toBe(JAN0 + H);
+  });
+
+  it('skips a header row if one is present, without assuming a fixed shape', async () => {
+    const csv = ['open_time,open,high,low,close,volume', msRow(0, 100)].join('\n');
+    const { fetchFn } = mockFetch({ 'SOLUSDT-1h-2024-01.zip': { zip: zipOf('SOLUSDT-1h-2024-01.csv', csv) } });
+    const out = await provider(fetchFn).getCandles('SOL', '1h', JAN0, JAN0);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.close).toBe(100);
+  });
+
+  it('spans multiple months, one archive fetched per calendar month', async () => {
+    const feb0 = Date.UTC(2024, 1, 1);
+    const febRow = `${feb0},99,101,98,105,1000,${feb0 + H - 1},99000,10,500,49500,0`;
+    const { fetchFn, calls } = mockFetch({
+      'SOLUSDT-1h-2024-01.zip': { zip: zipOf('a.csv', msRow(0)) },
+      'SOLUSDT-1h-2024-02.zip': { zip: zipOf('a.csv', febRow) },
+    });
+    const out = await provider(fetchFn).getCandles('SOL', '1h', JAN0, feb0);
+    expect(calls.filter((c) => c.includes('.zip'))).toHaveLength(2);
+    expect(out.map((c) => c.close)).toEqual([100, 105]);
+  });
+
+  it('treats a 404 for a month as "not published", not an error', async () => {
+    const { fetchFn } = mockFetch({}); // every URL 404s
+    const out = await provider(fetchFn).getCandles('SOL', '1h', JAN0, JAN0);
+    expect(out).toEqual([]);
+  });
+
+  it('caches a downloaded archive on disk and never re-fetches it', async () => {
+    const csv = msRow(0);
+    const { fetchFn } = mockFetch({ 'SOLUSDT-1h-2024-01.zip': { zip: zipOf('a.csv', csv) } });
+    const p = provider(fetchFn);
+    await p.getCandles('SOL', '1h', JAN0, JAN0);
+
+    const throwingFetch: BhFetchFn = async () => { throw new Error('should not be called — cache hit expected'); };
+    const p2 = provider(throwingFetch, { cacheDir });
+    const out = await p2.getCandles('SOL', '1h', JAN0, JAN0);
+    expect(out).toHaveLength(1);
+  });
+
+  it('throws with the mapped symbol name when a token has no symbolMap entry', async () => {
+    const p = new BinanceHistoricalCandleProvider({ symbolMap: {}, cacheDir, fetchFn: mockFetch({}).fetchFn });
+    await expect(p.getCandles('JUP', '1h', JAN0, JAN0)).rejects.toThrow(BinanceHistoricalProviderError);
+  });
+
+  it('rejects a malformed row rather than silently coercing it to NaN', async () => {
+    const { fetchFn } = mockFetch({ 'SOLUSDT-1h-2024-01.zip': { zip: zipOf('a.csv', 'not,a,valid,kline,row') } });
+    await expect(provider(fetchFn).getCandles('SOL', '1h', JAN0, JAN0)).rejects.toThrow(BinanceHistoricalProviderError);
+  });
+
+  it('discovers every listed month, oldest first', async () => {
+    const { fetchFn } = mockFetch({
+      '?prefix=': { text: listingXml('SOLUSDT', '1h', ['2020-08', '2020-09', '2021-01']) },
+    });
+    const months = await provider(fetchFn).discoverAvailableMonths('SOLUSDT', '1h');
+    expect(months).toEqual(['2020-08', '2020-09', '2021-01']);
+  });
+
+  it('refuses to silently under-report a truncated (>1000 key) listing', async () => {
+    const { fetchFn } = mockFetch({ '?prefix=': { text: listingXml('SOLUSDT', '1h', ['2020-08'], true) } });
+    await expect(provider(fetchFn).discoverAvailableMonths('SOLUSDT', '1h')).rejects.toThrow(/truncated/);
+  });
+
+  it('throws when a symbol has no archives at all, rather than returning an empty history silently', async () => {
+    const { fetchFn } = mockFetch({ '?prefix=': { text: listingXml('NOPEUSDT', '1h', []) } });
+    await expect(provider(fetchFn).discoverAvailableMonths('NOPEUSDT', '1h')).rejects.toThrow(BinanceHistoricalProviderError);
   });
 });
