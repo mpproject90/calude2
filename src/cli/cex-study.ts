@@ -32,6 +32,7 @@ import { BinanceHistoricalCandleProvider, type MonthFetchedEvent } from '../data
 import { synthesizeRatioSeries } from '../data/synthesize.js';
 import { computeEntryFunnel, type CrossUpEvent } from '../backtest/funnel.js';
 import { declusterAtWindows } from '../backtest/decluster.js';
+import { CEX_STUDY_MINTS, CEX_STUDY_DEFAULT_TOKENS } from './cexStudyTokens.js';
 import { parseConfig } from '../config/load.js';
 import { formatErrorChain } from '../util/errorChain.js';
 
@@ -48,27 +49,15 @@ function arg(name: string, fallback?: string): string {
 const interval = arg('interval', '1h') as Interval;
 const dbPath = arg('db', 'data/binance-vision.db');
 const cacheDir = arg('cache-dir', 'data/binance-vision-cache');
-const tokensArg = arg('tokens', 'JUP,JTO,PYTH,WIF,BONK,RAY,ORCA');
+const tokensArg = arg('tokens', CEX_STUDY_DEFAULT_TOKENS);
 
 if (!INTERVALS.includes(interval)) throw new Error(`--interval must be one of ${INTERVALS.join(', ')}`);
 
-// Real, independently-verified Solana mints (same addresses used for the
-// DECISIONS §32 screen) — parseConfig only checks base58 shape, but using
-// the real mints keeps this config meaningful rather than a placeholder.
-const MINTS: Readonly<Record<string, string>> = {
-  JUP: 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN',
-  JTO: 'jtojtomepa8beP8AuQc6eXt5FriJwfFMwQx2v2f9mCL',
-  BONK: 'DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263',
-  WIF: 'EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm',
-  PYTH: 'HZ1JovNiVvGrGNiiYvEozEVgZ58xaU3RKwX8eACQBCt3',
-  RAY: '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R',
-  ORCA: 'orcaEKTdK7LKz57vaAYr9QeNsVEPfiu6QeMU1kektZE',
-};
-
+const MINTS = CEX_STUDY_MINTS;
 const symbols = tokensArg.split(',').map((s) => s.trim().toUpperCase()).filter((s) => s.length > 0);
 for (const s of symbols) {
   if (MINTS[s] === undefined) {
-    throw new Error(`no known Solana mint for "${s}" — add it to MINTS in cex-study.ts, or drop it from --tokens`);
+    throw new Error(`no known Solana mint for "${s}" — add it to CEX_STUDY_MINTS in cexStudyTokens.ts, or drop it from --tokens`);
   }
 }
 
