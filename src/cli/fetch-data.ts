@@ -284,18 +284,25 @@ async function runGeckoTerminal(): Promise<void> {
   let solPool: string | null = null;
   let tokenCandles: Candle[] = [];
 
+  // Each series is cached IMMEDIATELY after it resolves, not after both do —
+  // otherwise one series succeeding in full (real request budget spent) gets
+  // thrown away if the OTHER series then fails, same principle as the raw-
+  // sample finally block above (DECISIONS §24). Confirmed happening: the
+  // 179-day pinned run below had JUP/SOL's fetch complete cleanly, then
+  // SOL/USDC exhaust its retry budget — without this, JUP/SOL's already-
+  // fetched data would have been discarded along with the failure.
+  const repo = new CandleRepository(db);
+
   try {
     const tokenPull = await resolvePoolSeries(`${symbol}/SOL`, tokenAddress, SOL_MINT, gecko, pinnedTokenPool);
     tokenPool = tokenPull.pool;
+    console.log(`\n${symbol}/SOL selected pool: ${tokenPool ?? 'NONE — no pool traded in this window'}${tokenPull.pinned ? '  [PINNED — dominance comparison skipped]' : ''}`);
+    tokenCandles = cacheAndReport(repo, symbol, tokenPull.candles, 'geckoterminal', tokenPool ?? '');
+
     const solPull = await resolvePoolSeries('SOL/USDC', SOL_MINT, USDC_MINT, geckoRef, pinnedSolPool);
     solPool = solPull.pool;
-
-    const repo = new CandleRepository(db);
-    tokenCandles = cacheAndReport(repo, symbol, tokenPull.candles, 'geckoterminal', tokenPool ?? '');
+    console.log(`\nSOL/USDC selected pool: ${solPool ?? 'NONE — no pool traded in this window'}${solPull.pinned ? '  [PINNED — dominance comparison skipped]' : ''}`);
     cacheAndReport(repo, 'SOL', solPull.candles, 'geckoterminal', solPool ?? '');
-
-    console.log(`\n${symbol}/SOL selected pool: ${tokenPool ?? 'NONE — no pool traded in this window'}${tokenPull.pinned ? '  [PINNED — dominance comparison skipped]' : ''}`);
-    console.log(`SOL/USDC selected pool: ${solPool ?? 'NONE — no pool traded in this window'}${solPull.pinned ? '  [PINNED — dominance comparison skipped]' : ''}`);
 
     const wick = computeWickDiagnostics(tokenCandles);
     console.log(`\n${symbol}/SOL wick/ATR diagnostics — the range-widening replacement (DECISIONS §23, §26):`);
