@@ -100,6 +100,74 @@ export const limitsSchema = z.object({
   minViableBuyAmountSol: decimalString.default('0.05'),
 });
 
+/**
+ * One take-profit tranche (DECISIONS §39/§40) — phase 2's manual-entry,
+ * automated-exit design. `sellPct` is a percentage of the ORIGINAL position
+ * size, not of whatever remains when this tranche fires.
+ */
+export const tpTrancheSchema = z.object({
+  targetGainPct: z.number().positive().max(10_000),
+  sellPct: z.number().positive().max(100),
+});
+
+/**
+ * Multi-tranche take-profit ladder plus trailing/stop/time, for a
+ * price-triggered (not indicator-triggered) position (DECISIONS §39).
+ * `minNetFloorPct`/`maxFixedCostPctOfProceeds` are the two config-time
+ * economic checks the operator specified (§40) — STRUCTURAL only here
+ * (ordering, sum ≤ 100%); the economic checks themselves run separately via
+ * `computeLadderCostPreview` so a failing ladder can still be REPORTED with
+ * its numbers, not just rejected bare (see `config-check.ts`).
+ */
+export const ladderExitSchema = z
+  .object({
+    tranches: z.array(tpTrancheSchema).min(1, 'at least one take-profit tranche is required'),
+    trailing: z
+      .object({ enabled: z.boolean().default(false), trailPct: pct.default(10) })
+      .default({ enabled: false, trailPct: 10 }),
+    stopLossPct: pct.default(15),
+    /** Wall-clock, not candles — this position isn't driven by a candle timeframe. */
+    timeExitMinutes: z.number().int().positive().default(2_880),
+    /** §40 — a tranche must return at least this much net of ALL its own exit costs. */
+    minNetFloorPct: z.number().min(0).max(1_000).default(5),
+    /** §40 — the tranche's fixed fee (priority + Jito, roughly constant per tx) must not exceed this share of its gross proceeds. */
+    maxFixedCostPctOfProceeds: pct.default(20),
+  })
+  .superRefine((v, ctx) => {
+    for (let i = 1; i < v.tranches.length; i++) {
+      if (v.tranches[i]!.targetGainPct <= v.tranches[i - 1]!.targetGainPct) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom, path: ['tranches', i, 'targetGainPct'],
+          message: 'tranches must be in strictly ascending targetGainPct order',
+        });
+      }
+    }
+    const totalSellPct = v.tranches.reduce((s, t) => s + t.sellPct, 0);
+    if (totalSellPct > 100) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: ['tranches'],
+        message: `tranche sellPct sums to ${totalSellPct}%, cannot exceed 100%`,
+      });
+    }
+  });
+
+/**
+ * A manually-picked, price-triggered position (DECISIONS §39): the operator
+ * supplies the token and a limit price; no indicator decides entry. No
+ * `tier` — that gate existed to filter which tokens an automated scanner
+ * would consider, and does not apply when the operator has already picked
+ * the token by hand.
+ */
+export const manualPositionSchema = z.object({
+  address: solanaAddress,
+  symbol: z.string().min(1).max(20),
+  buyAmountSol: decimalString,
+  limitPrice: z.number().positive(),
+  pinnedPoolAddress: solanaAddress.optional(),
+  ladder: ladderExitSchema,
+  limits: limitsSchema.default({}),
+});
+
 export const tokenSchema = z.object({
   address: solanaAddress,
   symbol: z.string().min(1).max(20),
@@ -221,9 +289,25 @@ export const configSchema = z
     tiers: z
       .object({ A: tierAGatesSchema.default({}), B: tierBGatesSchema.default({}) })
       .default({ A: {}, B: {} }),
-    tokens: z.array(tokenSchema).min(1, 'at least one token is required'),
+    /**
+     * Indicator-driven tokens (phase 1, REJECTED as a live-entry hypothesis
+     * — DECISIONS §27–§38). No longer required: a live/paper deployment may
+     * run on `positions` alone. Kept usable, not required, because
+     * `data:fetch`/`data:screen`/`backtest` still operate on it — the
+     * apparatus is preserved, not deleted (§39).
+     */
+    tokens: z.array(tokenSchema).default([]),
+    /** Phase 2 (DECISIONS §39): manually-picked, price-triggered positions — the live entry path. */
+    positions: z.array(manualPositionSchema).default([]),
   })
   .superRefine((cfg, ctx) => {
+    if (cfg.tokens.length === 0 && cfg.positions.length === 0) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom, path: ['tokens'],
+        message: 'config has no tokens[] and no positions[] — nothing for this config to do',
+      });
+    }
+
     for (const [i, t] of cfg.tokens.entries()) {
       if (t.tier === 'B') {
         ctx.addIssue({
@@ -255,11 +339,26 @@ export const configSchema = z
         message: 'cannot exceed global.maxDeployedCapitalPct',
       });
     }
+
+    const seenPositions = new Set<string>();
+    cfg.positions.forEach((p, i) => {
+      if (seenPositions.has(p.address)) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['positions', i, 'address'],
+          message: `duplicate position address: ${p.address}`,
+        });
+      }
+      seenPositions.add(p.address);
+    });
   });
 
 export type Config = z.infer<typeof configSchema>;
 export type TokenConfig = z.infer<typeof tokenSchema>;
 export type GlobalConfig = z.infer<typeof globalSchema>;
+export type ManualPositionConfig = z.infer<typeof manualPositionSchema>;
+export type LadderExitConfig = z.infer<typeof ladderExitSchema>;
+export type TpTranche = z.infer<typeof tpTrancheSchema>;
 export type TierAGates = z.infer<typeof tierAGatesSchema>;
 export type TierBGates = z.infer<typeof tierBGatesSchema>;
 export type ExpectedMoveConfig = z.infer<typeof expectedMoveSchema>;

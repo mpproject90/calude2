@@ -38,8 +38,20 @@ describe('config validation', () => {
     expect(parseConfig({ global: {}, tokens: [token()] }).global.mode).toBe('backtest');
   });
 
-  it('rejects an empty token list', () => {
-    expect(() => parseConfig({ global: {}, tokens: [] })).toThrow(ConfigError);
+  it('rejects a config with neither tokens nor positions — nothing to do', () => {
+    expect(() => parseConfig({ global: {}, tokens: [], positions: [] })).toThrow(ConfigError);
+  });
+
+  it('accepts an empty token list when positions[] carries the config instead (DECISIONS §39)', () => {
+    const cfg = parseConfig({
+      global: {}, tokens: [],
+      positions: [{
+        address: JUP, symbol: 'JUP', buyAmountSol: '0.5', limitPrice: 0.8,
+        ladder: { tranches: [{ targetGainPct: 15, sellPct: 100 }] },
+      }],
+    });
+    expect(cfg.tokens).toHaveLength(0);
+    expect(cfg.positions).toHaveLength(1);
   });
 
   it('rejects a non-base58 address', () => {
@@ -132,5 +144,64 @@ describe('live trading gate', () => {
   it('is a no-op for non-live modes', () => {
     const cfg = parseConfig({ global: { mode: 'paper' }, tokens: [token()] });
     expect(() => assertLiveTradingAllowed(cfg, {})).not.toThrow();
+  });
+});
+
+describe('manual positions — price-triggered entry/exit (DECISIONS §39)', () => {
+  const position = (over: Record<string, unknown> = {}) => ({
+    address: JUP, symbol: 'JUP', buyAmountSol: '0.5', limitPrice: 0.8,
+    ladder: { tranches: [{ targetGainPct: 15, sellPct: 50 }, { targetGainPct: 30, sellPct: 50 }] },
+    ...over,
+  });
+
+  it('applies ladder defaults: no trailing, 15% stop, 2880-minute time exit, 5%/20% economic thresholds', () => {
+    const cfg = parseConfig({ global: {}, tokens: [], positions: [position()] });
+    const p = cfg.positions[0]!;
+    expect(p.ladder.trailing).toEqual({ enabled: false, trailPct: 10 });
+    expect(p.ladder.stopLossPct).toBe(15);
+    expect(p.ladder.timeExitMinutes).toBe(2880);
+    expect(p.ladder.minNetFloorPct).toBe(5);
+    expect(p.ladder.maxFixedCostPctOfProceeds).toBe(20);
+  });
+
+  it('rejects tranches not in strictly ascending targetGainPct order', () => {
+    expect(() => parseConfig({
+      global: {}, tokens: [],
+      positions: [position({ ladder: { tranches: [{ targetGainPct: 30, sellPct: 50 }, { targetGainPct: 15, sellPct: 50 }] } })],
+    })).toThrow(ConfigError);
+    expect(() => parseConfig({
+      global: {}, tokens: [],
+      positions: [position({ ladder: { tranches: [{ targetGainPct: 15, sellPct: 50 }, { targetGainPct: 15, sellPct: 50 }] } })],
+    })).toThrow(ConfigError);   // equal targets rejected too — "strictly" ascending
+  });
+
+  it('rejects tranche sellPct summing over 100%', () => {
+    expect(() => parseConfig({
+      global: {}, tokens: [],
+      positions: [position({ ladder: { tranches: [{ targetGainPct: 15, sellPct: 60 }, { targetGainPct: 30, sellPct: 60 }] } })],
+    })).toThrow(ConfigError);
+  });
+
+  it('allows tranche sellPct summing under 100% — a runner held open', () => {
+    const cfg = parseConfig({
+      global: {}, tokens: [],
+      positions: [position({ ladder: { tranches: [{ targetGainPct: 15, sellPct: 40 }] } })],
+    });
+    expect(cfg.positions[0]!.ladder.tranches).toHaveLength(1);
+  });
+
+  it('rejects duplicate position addresses', () => {
+    expect(() => parseConfig({ global: {}, tokens: [], positions: [position(), position()] }))
+      .toThrow(ConfigError);
+  });
+
+  it('rejects a non-positive limit price', () => {
+    expect(() => parseConfig({ global: {}, tokens: [], positions: [position({ limitPrice: 0 })] }))
+      .toThrow(ConfigError);
+  });
+
+  it('has no tier field — token selection is manual, the automated-scanner gate does not apply', () => {
+    const cfg = parseConfig({ global: {}, tokens: [], positions: [position()] });
+    expect('tier' in cfg.positions[0]!).toBe(false);
   });
 });
