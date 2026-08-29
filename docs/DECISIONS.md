@@ -876,3 +876,38 @@ shared by all three (`indicators/core.ts`), and the backtest engine passes
 `global.indicatorWarmupMultiplier` to all three calls (§27). No indicator's
 own arithmetic changed, only how soon its output is trusted after a gap or
 from cold start.
+
+## 29. The cache caveat is bigger than "switching providers" — pool selection isn't stable run-to-run either
+
+**§18's cache caveat warned about switching `--provider` for an
+already-fetched symbol.** A `--days 179` fetch of JUP found a narrower,
+same-provider version of the same problem: GeckoTerminal's free tier rate-
+limited hard enough (§24) that 5 of JUP/SOL's 6 pool candidates were
+excluded, leaving one — a much smaller, thinner pool (~0.13 base-asset
+volume on a bar where the previously-selected pool had ~443) — as the
+"selected" pool purely by elimination, not by winning a genuine volume
+comparison. Re-fetching then **upserted that thin pool's candles into the
+SAME `(token, interval, timestamp)` rows the previously-validated, much
+larger pool had populated**, for every overlapping timestamp. Confirmed
+directly: at timestamp 1787983200000, `close` changed from
+`0.00210555555555556` (the earlier, validated pool) to `0.00210996712646431`
+(the new one) with volume dropping from ~443 to ~0.127 — two different
+pools' OHLC silently blended into what looks like one consistent series.
+
+**The cache has no concept of "which pool."** `candles.provider` records
+only the PROVIDER name (`geckoterminal`), not the pool address, so nothing
+in the schema or the upsert logic can detect or prevent this — pool
+selection can legitimately land on a different pool between two runs of
+the exact same command (candidate availability varies with rate-limit luck,
+not just genuine volume shifts), and every such re-fetch silently
+contaminates whatever was cached before it for the overlapping window.
+
+**Not fixed here** — same reasoning as §18: a `(token, interval, timestamp,
+pool_address)` cache key would prevent it structurally, but that's a schema
+migration not otherwise asked for. Until then: **treat any re-fetch of an
+already-cached symbol as capable of silently replacing validated data with
+data from a worse pool, even without changing `--provider`.** A fresh `--db`
+path is the only reliable protection today. `fetch-data.ts`'s printed pool
+address per run is the only way to notice this happened after the fact —
+compare it against the previous run's printed selection before trusting a
+re-fetch's data.
