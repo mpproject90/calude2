@@ -7,6 +7,8 @@ import {
 } from '../src/rules/conditions.js';
 import { evaluateEntry } from '../src/rules/entry.js';
 import { evaluateLimitEntry } from '../src/rules/limitEntry.js';
+import { openLadderPosition, evaluateLadderExit } from '../src/rules/ladderExit.js';
+import type { LadderExitConfig } from '../src/config/schema.js';
 import {
   evaluateExit, evaluateIntrabarStops, stopLossPriceFor, timeExitIndexFor,
   type OpenPosition,
@@ -407,6 +409,161 @@ describe('portfolio limits', () => {
                       realizedPnlSol: sol('0.1') }];
     const r = checkPortfolioLimits({ ...base, state: state({ recentClosed: closed }) });
     expect(failures(r).some((m) => /cooling down/.test(m))).toBe(false);
+  });
+});
+
+function ladderCfg(over: Record<string, unknown> = {}): LadderExitConfig {
+  return parseConfig({
+    global: {}, tokens: [],
+    positions: [{
+      address: JUP, symbol: 'JUP', buyAmountSol: '1', limitPrice: 100,
+      ladder: {
+        tranches: [{ targetGainPct: 15, sellPct: 40 }, { targetGainPct: 30, sellPct: 40 }],
+        ...over,
+      },
+    }],
+  }).positions[0]!.ladder;
+}
+
+describe('ladder exit (DECISIONS §39) — take-profit tranches, trailing, stop, time', () => {
+  const T0 = 1_700_000_000_000;
+  const MIN = 60_000;
+
+  it('opens with the standard stop price and zero tranches filled', () => {
+    const cfg = ladderCfg({ stopLossPct: 15 });
+    const s = openLadderPosition(100, T0, sol('1'), cfg);
+    expect(s.stopLossPrice).toBeCloseTo(85, 8);
+    expect(s.filledTrancheCount).toBe(0);
+    expect(s.remainingSizeSol.eq(sol('1'))).toBe(true);
+    expect(s.peakPrice).toBe(100);
+    expect(s.trailingArmed).toBe(false);
+  });
+
+  it('fires the hard stop-loss for the entire remaining position, intrabar', () => {
+    const cfg = ladderCfg({ stopLossPct: 15 });
+    const s = openLadderPosition(100, T0, sol('1'), cfg);
+    const r = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0.5,
+      window: { low: 80, high: 86, close: 84, now: T0 + 10 * MIN },
+    });
+    expect(r.trigger).not.toBeNull();
+    expect(r.trigger!.reason).toBe('stop_loss');
+    expect(r.trigger!.fillPrice).toBeCloseTo(85 * (1 - 0.5 / 100), 8);
+    expect(r.trigger!.sizeSol.eq(sol('1'))).toBe(true);
+  });
+
+  it('fires the next unfilled tranche, sized off the ORIGINAL position, not the remainder', () => {
+    const cfg = ladderCfg({ tranches: [{ targetGainPct: 15, sellPct: 40 }, { targetGainPct: 30, sellPct: 40 }] });
+    const s = openLadderPosition(100, T0, sol('1'), cfg);
+    const r = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 114, high: 116, close: 115, now: T0 + MIN },
+    });
+    expect(r.trigger!.reason).toBe('take_profit');
+    expect(r.trigger!.trancheIndex).toBe(0);
+    expect(r.trigger!.fillPrice).toBeCloseTo(115, 8);   // 100 * 1.15, no slippage
+    expect(r.trigger!.sizeSol.eq(sol('0.4'))).toBe(true);   // 40% of the ORIGINAL 1 SOL
+    expect(r.nextState.filledTrancheCount).toBe(1);
+    expect(r.nextState.remainingSizeSol.eq(sol('0.6'))).toBe(true);
+  });
+
+  it('fires only the NEAREST unfilled tranche when one move clears more than one target', () => {
+    const cfg = ladderCfg({ tranches: [{ targetGainPct: 15, sellPct: 40 }, { targetGainPct: 30, sellPct: 40 }] });
+    const s = openLadderPosition(100, T0, sol('1'), cfg);
+    const r = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 138, high: 140, close: 139, now: T0 + MIN },   // clears BOTH 115 and 130 targets
+    });
+    expect(r.trigger!.trancheIndex).toBe(0);
+    expect(r.nextState.filledTrancheCount).toBe(1);   // not 2 — tranche 2 waits for the next evaluation
+  });
+
+  it('the second tranche fires on a later call, still sized off the original position', () => {
+    const cfg = ladderCfg({ tranches: [{ targetGainPct: 15, sellPct: 40 }, { targetGainPct: 30, sellPct: 40 }] });
+    let s = openLadderPosition(100, T0, sol('1'), cfg);
+    const first = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 114, high: 116, close: 115, now: T0 + MIN },
+    });
+    s = first.nextState;
+    const second = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 129, high: 131, close: 130, now: T0 + 2 * MIN },
+    });
+    expect(second.trigger!.reason).toBe('take_profit');
+    expect(second.trigger!.trancheIndex).toBe(1);
+    expect(second.trigger!.sizeSol.eq(sol('0.4'))).toBe(true);
+    expect(second.nextState.remainingSizeSol.eq(sol('0.2'))).toBe(true);   // 1 - 0.4 - 0.4
+  });
+
+  it('does not arm the trailing stop before any tranche has filled', () => {
+    const cfg = ladderCfg({ trailing: { enabled: true, trailPct: 5 } });
+    const s = openLadderPosition(100, T0, sol('1'), cfg);
+    // price rises to 110 then falls to 104 (a 5.5% retreat from the 110 peak) — would trip
+    // a trailing stop if armed, but no tranche has filled yet (110 < the 115 first target).
+    const r = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 104, high: 110, close: 106, now: T0 + MIN },
+    });
+    expect(r.trigger).toBeNull();
+    expect(r.nextState.trailingArmed).toBe(false);
+  });
+
+  it('arms and fires the trailing stop once the first tranche has filled', () => {
+    const cfg = ladderCfg({
+      tranches: [{ targetGainPct: 15, sellPct: 40 }, { targetGainPct: 30, sellPct: 40 }],
+      trailing: { enabled: true, trailPct: 5 },
+    });
+    let s = openLadderPosition(100, T0, sol('1'), cfg);
+    const tp1 = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 119, high: 120, close: 119, now: T0 + MIN },
+    });
+    expect(tp1.trigger!.reason).toBe('take_profit');
+    s = tp1.nextState;
+    expect(s.trailingArmed).toBe(true);
+    expect(s.peakPrice).toBe(120);
+
+    // price retreats 5% from the 120 peak -> trail stop at 114
+    const trail = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 113, high: 118, close: 115, now: T0 + 2 * MIN },
+    });
+    expect(trail.trigger!.reason).toBe('trailing');
+    expect(trail.trigger!.fillPrice).toBeCloseTo(114, 8);
+    expect(trail.trigger!.sizeSol.eq(sol('0.6'))).toBe(true);   // the remaining 60%, all of it
+  });
+
+  it('a same-window stop-loss beats a same-window take-profit target', () => {
+    const cfg = ladderCfg({ tranches: [{ targetGainPct: 15, sellPct: 40 }] });
+    const s = openLadderPosition(100, T0, sol('1'), cfg);
+    const r = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 80, high: 120, close: 90, now: T0 + MIN },   // both the 85 stop and the 115 target touched
+    });
+    expect(r.trigger!.reason).toBe('stop_loss');
+  });
+
+  it('fires the time exit for the entire remaining position at the window close, no slippage', () => {
+    const cfg = ladderCfg({ timeExitMinutes: 60 });
+    const s = openLadderPosition(100, T0, sol('1'), cfg);
+    const r = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0.5,
+      window: { low: 99, high: 102, close: 101, now: T0 + 60 * MIN },
+    });
+    expect(r.trigger!.reason).toBe('time');
+    expect(r.trigger!.fillPrice).toBe(101);   // window.close, unmodified — matches rules/exit.ts's time exit
+    expect(r.trigger!.sizeSol.eq(sol('1'))).toBe(true);
+  });
+
+  it('does not fire the time exit before it elapses', () => {
+    const cfg = ladderCfg({ timeExitMinutes: 60 });
+    const s = openLadderPosition(100, T0, sol('1'), cfg);
+    const r = evaluateLadderExit({
+      config: cfg, state: s, exitSlippagePct: 0,
+      window: { low: 99, high: 101, close: 100, now: T0 + 59 * MIN },
+    });
+    expect(r.trigger).toBeNull();
   });
 });
 
