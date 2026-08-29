@@ -15,6 +15,7 @@ deliberate and operator-approved:
 | Backtest on whatever series | SOL-quoted, synthesized from two USDT series | DECISIONS §6 |
 | Exits evaluated on candle close | Stops evaluated **intrabar**; entries stay on close | DECISIONS §7 |
 | Exit order: stop, time, RSI, trailing, safety | safety → stop-loss → trailing → RSI → **time last** | DECISIONS §8 |
+| Warm-up = `period × 7` (≈98 candles at period 14) | `period × 4.5` (63 candles) — a 1%, not 0.1%, Wilder-decay contamination budget | DECISIONS §28 |
 
 ---
 

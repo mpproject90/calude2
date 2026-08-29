@@ -4,7 +4,7 @@ import type { Candle, CandleGap } from '../src/types/index.js';
 import { computeRsi, RSI_FLAT } from '../src/indicators/rsi.js';
 import { computeMfi } from '../src/indicators/mfi.js';
 import { computeAtr, trueRange, expectedMoveFromAtr } from '../src/indicators/atr.js';
-import { buildReliabilityMask, wilderSmooth } from '../src/indicators/core.js';
+import { buildReliabilityMask, wilderSmooth, DEFAULT_WARMUP_MULTIPLIER } from '../src/indicators/core.js';
 
 interface Reference {
   candles: Candle[];
@@ -210,5 +210,28 @@ describe('warm-up mask', () => {
     });
     expect(mask[12]).toBe('insufficient-warmup');
     expect(mask[13]).toBeNull();
+  });
+
+  it('rounds a fractional multiplier UP to a whole bar, never down', () => {
+    // period=2, multiplier=4.5 -> warmup=9 (ceil of 9 exactly) vs period=2,
+    // multiplier=4 -> warmup=8. Distinguishing the two catches a floor/round
+    // regression, not just a ceil-of-an-exact-integer no-op.
+    const c = series(new Array(20).fill(100));
+    const exact = buildReliabilityMask(c, { period: 2, warmupMultiplier: 4.5 });
+    expect(exact[7]).toBe('insufficient-warmup');   // index 7 = 8th bar, < 9
+    expect(exact[8]).toBeNull();                     // index 8 = 9th bar, >= 9
+
+    // period=3, multiplier=4.5 -> raw 13.5, must round UP to 14, not down to 13.
+    const fractional = buildReliabilityMask(c, { period: 3, warmupMultiplier: 4.5 });
+    expect(fractional[12]).toBe('insufficient-warmup');   // 13th bar, < 14
+    expect(fractional[13]).toBeNull();                     // 14th bar, >= 14
+  });
+
+  it('defaults to a 63-bar (period 14 × 4.5) shadow — the 1% Wilder-decay budget (DECISIONS §28)', () => {
+    expect(DEFAULT_WARMUP_MULTIPLIER).toBe(4.5);
+    const c = series(new Array(70).fill(100));
+    const mask = buildReliabilityMask(c, { period: 14 });   // no warmupMultiplier -> default
+    expect(mask[61]).toBe('insufficient-warmup');   // 62nd bar, < 63
+    expect(mask[62]).toBeNull();                      // 63rd bar, >= 63
   });
 });

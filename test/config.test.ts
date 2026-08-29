@@ -24,7 +24,7 @@ describe('config validation', () => {
     const cfg = parseConfig({ global: {}, tokens: [token()] });
     expect(cfg.global.mode).toBe('backtest');
     expect(cfg.global.maxConcurrentPositions).toBe(3);
-    expect(cfg.global.indicatorWarmupMultiplier).toBe(7);
+    expect(cfg.global.indicatorWarmupMultiplier).toBe(4.5);
     expect(cfg.tokens[0]!.exit.stopLossPct).toBe(15);
     expect(cfg.tokens[0]!.entry.minUnderperformanceVsSol).toBe(0.05);
   });

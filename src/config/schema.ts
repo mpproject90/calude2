@@ -175,8 +175,14 @@ export const globalSchema = z.object({
     solMaTimeframe: '4h',
   }),
   costFloor: costFloorSchema.default({}),
-  /** §5 — warm-up multiplier. period * this many candles before any value. */
-  indicatorWarmupMultiplier: z.number().int().min(1).default(7),
+  /**
+   * §5 — warm-up/gap-shadow multiplier: period * this many candles before any
+   * value is trusted, rounded up to a whole bar (indicators/core.ts). NOT
+   * required to be an integer — 4.5 (63 bars at period 14) is a 1%
+   * residual-contamination budget against Wilder decay, not a round number.
+   * See DECISIONS §28 for why 1% was chosen over a stricter 0.1% (≈6.71×).
+   */
+  indicatorWarmupMultiplier: z.number().min(1).default(4.5),
   /** §10 — warn below this trade count. */
   minTradesForConclusion: z.number().int().positive().default(50),
   /**

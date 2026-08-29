@@ -812,3 +812,67 @@ weekend HOURS may or may not survive proportionally into 4h buckets — not
 measured), a less gap-prone pool, a smaller `indicatorWarmupMultiplier`, or
 accepting the result as-is. Report the number; the operator draws the
 conclusion (CLAUDE.md hard rule).
+
+## 28. Warm-up/gap-shadow default cut from `period × 7` to `period × 4.5`
+
+**§10 justified `period × 7` (98 bars at period 14) by a seed-decay
+calculation: `(1-1/14)^84 ≈ 0.2%`.** The operator, reviewing the real-data
+0-trade result, asked whether that was numerically justified for a GAP
+specifically (not just the initial seed) — Wilder smoothing is a first-order
+IIR filter, so a gap's contamination decays by the same factor,
+`(period-1)/period` per bar, every bar afterward. Solved for the bar count N
+at which that residual influence falls below a threshold ε:
+`N = ln(ε) / ln((period-1)/period)`. At period 14:
+
+| Residual influence | N (bars) |
+|---|---|
+| <1% | 63 |
+| <0.5% | 71 |
+| <0.1% | 94 |
+
+**§10's 98 sits almost exactly at the 0.1% mark (94), not meaningfully
+beyond it** — the original heuristic was already close to a demanding
+standard, just not derived this explicitly. The real question was which
+standard is right, and the operator's answer: **1%, not 0.1%.** RSI/MFI feed
+a threshold (30/70) chosen by convention, not calibrated to a tenth of a
+point — demanding 0.1% purity on an input feeding a decision boundary that
+coarse is false precision. Verified against the real 90-day JUP data (same
+`buildReliabilityMask` the code runs, swept across N):
+
+| N | Reliable bars | Reliable % | Longest stretch |
+|---|---|---|---|
+| 98 (old default) | 150 | 7.60% | 76 |
+| 94 (0.1%) | 162 | 8.21% | 80 |
+| 84 | 194 | 9.83% | — |
+| 70 (0.5%) | 255 | 12.92% | — |
+| **63 (1%, new default)** | **293** | **14.85%** | **111** |
+| 56 | 340 | 17.23% | — |
+| 42 | 455 | 23.06% | — |
+| 28 | 621 | 31.47% | — |
+| 14 | 971 | 49.21% | — |
+
+63 roughly doubles the reliable fraction versus 98, and extends the longest
+usable stretch by 46% (76→111) — a materially different backtest, not a
+rounding change.
+
+**Decision:** `indicators/core.ts`'s `DEFAULT_WARMUP_MULTIPLIER` is now
+**4.5** (63 bars at period 14), and `global.indicatorWarmupMultiplier`'s
+schema default matches. The multiplier no longer has to be an integer
+(`z.number().min(1)`, `.int()` dropped) — 4.5 is deliberate, not a
+convenience rounding — and `buildReliabilityMask` now does
+`Math.ceil(period * mult)` so a fractional product (any period other than a
+multiple of 2) still lands on a whole bar rather than truncating down, which
+would have silently weakened the budget it's supposed to enforce.
+
+**If ever tightened back toward the stricter end:** 94 is the 0.1% figure
+(`indicatorWarmupMultiplier: 6.714285714...` at period 14, or more simply
+just configure the absolute bar count desired via whatever period/multiplier
+product gets there). Not done now — the operator's reasoning above is the
+standing decision, this is just where the other end of the tradeoff sits if
+revisited.
+
+**This changes RSI, MFI and ATR identically** — `buildReliabilityMask` is
+shared by all three (`indicators/core.ts`), and the backtest engine passes
+`global.indicatorWarmupMultiplier` to all three calls (§27). No indicator's
+own arithmetic changed, only how soon its output is trusted after a gap or
+from cold start.

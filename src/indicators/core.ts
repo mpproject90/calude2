@@ -8,15 +8,29 @@
  */
 import type { Candle, CandleGap, IndicatorValue, UnreliableReason } from '../types/index.js';
 
-export const DEFAULT_WARMUP_MULTIPLIER = 7;
+/**
+ * DECISIONS §28: the shadow/warm-up window is a residual-contamination
+ * budget, not a round number. 4.5 × period(14) = 63 bars, the point at which
+ * Wilder decay ((period-1)/period per bar) brings a gap's or the seed's
+ * influence below 1% — chosen deliberately over a stricter 0.1% (≈6.71×,
+ * 94 bars at period 14) because RSI/MFI feed a threshold (30/70) picked by
+ * convention, not calibrated to a tenth of a point; demanding 0.1% purity on
+ * an input feeding a decision boundary that coarse is false precision, and on
+ * real data it cost roughly half the usable series (DECISIONS §28's sweep
+ * table). Was 7 (98 bars at period 14) until the operator's real-data review
+ * questioned it — see §28 for the full reasoning and the alternative.
+ */
+export const DEFAULT_WARMUP_MULTIPLIER = 4.5;
 
 export interface IndicatorOptions {
   readonly period: number;
   /**
-   * Candles required before a value is trusted, as a multiple of the period.
-   * Wilder smoothing is an EMA: it never fully "completes", it converges. At
-   * period*7 the seed's weight is (1 - 1/14)^84 ≈ 0.2% for period 14, which is
-   * below the noise floor of the price data itself.
+   * Candles required before a value is trusted, as a multiple of the period —
+   * NOT required to be an integer; `Math.ceil` rounds the product up to a
+   * whole bar count. Wilder smoothing is an EMA: it never fully "completes",
+   * it converges, so this is a residual-contamination BUDGET, not a
+   * "complete" point. See DEFAULT_WARMUP_MULTIPLIER and DECISIONS §28 for how
+   * the default was chosen and the tradeoff against a stricter alternative.
    */
   readonly warmupMultiplier?: number;
   /** Gaps in the series. Values spanning a gap are flagged unreliable. */
@@ -58,7 +72,7 @@ export function buildReliabilityMask(
   opts: IndicatorOptions,
 ): (UnreliableReason | null)[] {
   const mult = opts.warmupMultiplier ?? DEFAULT_WARMUP_MULTIPLIER;
-  const warmup = opts.period * mult;
+  const warmup = Math.ceil(opts.period * mult);
   const gaps = gapIndices(candles, opts.gaps ?? []);
   const mask: (UnreliableReason | null)[] = new Array(candles.length).fill(null);
 
