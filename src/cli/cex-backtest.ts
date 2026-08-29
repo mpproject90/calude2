@@ -41,9 +41,11 @@ import type { TokenConfig } from '../config/schema.js';
 import { runBacktest, type ClosedBacktestTrade } from '../backtest/engine.js';
 import { computeSampleMetrics, withZeroCosts, type SampleMetrics } from '../backtest/metrics.js';
 import { decluster } from '../backtest/decluster.js';
+import { replayExit, mfeWithinBars, type ExitVariant } from '../backtest/exitReplay.js';
+import { computeRsi } from '../indicators/rsi.js';
 import { sol } from '../util/amount.js';
 import { formatErrorChain } from '../util/errorChain.js';
-import type { Interval } from '../types/index.js';
+import type { Candle, IndicatorValue, Interval } from '../types/index.js';
 import { CEX_STUDY_MINTS, CEX_STUDY_DEFAULT_TOKENS } from './cexStudyTokens.js';
 
 function arg(name: string, fallback?: string): string {
@@ -129,6 +131,7 @@ async function main(): Promise<void> {
   const allTrades: ClosedBacktestTrade[] = [];
   const tradeSymbol = new Map<ClosedBacktestTrade, string>();
   const pooledRejections: Record<string, number> = {};
+  const tokenData = new Map<string, { candles: Candle[]; rsi: IndicatorValue[]; tokenCfg: TokenConfig }>();
 
   for (const symbol of symbols) {
     const candles = repo.getCandles(symbol, interval, wideOpen.from, wideOpen.to, '');
@@ -144,6 +147,8 @@ async function main(): Promise<void> {
     const tokenCfg: TokenConfig = {
       ...template, address: CEX_STUDY_MINTS[symbol]!, symbol, timeframe: interval, pinnedPoolAddress: undefined,
     };
+    const rsi = computeRsi(candles, { period: tokenCfg.rsi.period, warmupMultiplier: cfg.global.indicatorWarmupMultiplier, gaps });
+    tokenData.set(symbol, { candles: [...candles], rsi, tokenCfg });
 
     const result = runBacktest({
       token: tokenCfg, global: cfg.global, candles, solCandles, gaps,
@@ -249,6 +254,150 @@ async function main(): Promise<void> {
           '  by a favorable move, not a case of a good trade cut short.'),
     );
   }
+
+  // --- MFE decay by holding period (DECISIONS §38) — did most of the
+  // favorable move already show up by bar 24, or did it keep growing through
+  // bar 48? Only meaningful for trades that actually reached both marks —
+  // the 2 stop-loss trades are flagged N/A rather than extrapolated past
+  // their real exit (that would be a different, unasked question: "what if
+  // the stop hadn't fired").
+  console.log('\n=== MFE DECAY: 24-candle mark vs 48-candle mark ===');
+  console.log('token    barsHeld  MFE@24%   MFE@48%   fraction(24/48)');
+  const decayRatios: number[] = [];
+  for (const t of allTrades) {
+    const symbol = tradeSymbol.get(t)!;
+    const data = tokenData.get(symbol)!;
+    if (t.barsHeld < 24) {
+      console.log(`${symbol.padEnd(8)} ${String(t.barsHeld).padStart(8)}  stopped before the 24-candle mark (final MFE ${sig(t.mfePct, 2)}%) — N/A`);
+      continue;
+    }
+    const mfe24 = mfeWithinBars(data.candles, t.entryIndex, t.entryPrice, 24);
+    if (t.barsHeld < 48) {
+      console.log(
+        `${symbol.padEnd(8)} ${String(t.barsHeld).padStart(8)}  ${sig(mfe24, 2).padStart(7)}   ` +
+        `stopped before the 48-candle mark (final MFE ${sig(t.mfePct, 2)}%) — N/A`,
+      );
+      continue;
+    }
+    const mfe48 = mfeWithinBars(data.candles, t.entryIndex, t.entryPrice, 48);
+    const fraction = mfe48 > 0 ? mfe24 / mfe48 : NaN;
+    if (Number.isFinite(fraction)) decayRatios.push(fraction);
+    console.log(
+      `${symbol.padEnd(8)} ${String(t.barsHeld).padStart(8)}  ${sig(mfe24, 2).padStart(7)}   ${sig(mfe48, 2).padStart(7)}   ` +
+      `${Number.isFinite(fraction) ? pct(fraction) : 'N/A'}`,
+    );
+  }
+  if (decayRatios.length > 0) {
+    const avgRatio = decayRatios.reduce((s, r) => s + r, 0) / decayRatios.length;
+    const sortedRatios = [...decayRatios].sort((a, b) => a - b);
+    const medianRatio = sortedRatios[Math.floor(sortedRatios.length / 2)]!;
+    console.log(
+      `\n  Across the ${decayRatios.length} trades reaching both marks: average MFE@24/MFE@48 = ${pct(avgRatio)}, ` +
+      `median = ${pct(medianRatio)}.`,
+    );
+    console.log(
+      avgRatio > 0.85
+        ? '  Most of the favorable move was already visible by bar 24 — the back half of the 48-candle\n' +
+          '  window mostly did not add MFE. Independent of any trailing-stop question, the time exit\n' +
+          '  itself may simply be longer than the move needs.'
+        : '  MFE kept growing meaningfully into the back half of the window — a shorter time exit alone\n' +
+          '  would have cut off real upside, not just noise.',
+    );
+  }
+
+  // --- Exit variant replay (DECISIONS §38) — SAME 10 entries (verified below,
+  // not assumed), alternative exit rules only. No entry logic re-run: see
+  // exitReplay.ts's header for why re-running the whole engine per variant
+  // was rejected (a different exit timing can silently change which trades
+  // exist). Costs re-use each trade's real entry-time cost basis unchanged —
+  // only the exit price/reason varies by variant.
+  const EXIT_VARIANTS: ExitVariant[] = [
+    { label: 'control (current rules)', stopLossPct: 15, timeExitCandles: 48, rsiExitLevel: 70,
+      trailing: { enabled: false, activateAtPct: 20, trailPct: 10 }, takeProfitPct: null },
+    { label: 'trailing +3%/-2%', stopLossPct: 15, timeExitCandles: 48, rsiExitLevel: 70,
+      trailing: { enabled: true, activateAtPct: 3, trailPct: 2 }, takeProfitPct: null },
+    { label: 'trailing +5%/-3%', stopLossPct: 15, timeExitCandles: 48, rsiExitLevel: 70,
+      trailing: { enabled: true, activateAtPct: 5, trailPct: 3 }, takeProfitPct: null },
+    { label: 'take-profit +5%', stopLossPct: 15, timeExitCandles: 48, rsiExitLevel: 70,
+      trailing: { enabled: false, activateAtPct: 20, trailPct: 10 }, takeProfitPct: 5 },
+    { label: 'take-profit +8%', stopLossPct: 15, timeExitCandles: 48, rsiExitLevel: 70,
+      trailing: { enabled: false, activateAtPct: 20, trailPct: 10 }, takeProfitPct: 8 },
+  ];
+
+  function quickStats(nets: readonly number[]): { expectancy: number; winRate: number; profitFactor: number } {
+    const wins = nets.filter((n) => n > 0);
+    const losses = nets.filter((n) => n < 0);
+    const sumWins = wins.reduce((s, v) => s + v, 0);
+    const sumLossAbs = -losses.reduce((s, v) => s + v, 0);
+    const winRate = nets.length > 0 ? wins.length / nets.length : 0;
+    const lossRate = nets.length > 0 ? losses.length / nets.length : 0;
+    const avgWin = wins.length > 0 ? sumWins / wins.length : 0;
+    const avgLoss = losses.length > 0 ? sumLossAbs / losses.length : 0;
+    return {
+      expectancy: winRate * avgWin - lossRate * avgLoss, winRate,
+      profitFactor: sumLossAbs > 0 ? sumWins / sumLossAbs : (sumWins > 0 ? Infinity : 0),
+    };
+  }
+
+  console.log('\n=== EXIT VARIANT COMPARISON (DECISIONS §38) — SAME 10 entries, alternative exits only ===');
+  console.log(
+    '  CURVE-FITTING WARNING: choosing among exits tested on the SAME 10 trades (7 effective)\n' +
+    '  overfits by construction. This is NOT a validation and no variant is recommended below.\n' +
+    '  It answers a weaker question only: does ANY reasonable exit turn this positive, or does\n' +
+    '  none? None -> the entry has no edge, stop here. Several -> worth a proper sweep with\n' +
+    '  out-of-sample validation; this diagnostic is only what would justify spending that effort.\n',
+  );
+  console.log(
+    'variant                    costed exp   zero-cost exp  costed win%  zero-cost win%   costed PF  zero-cost PF',
+  );
+
+  let positiveCostedCount = 0;
+  let positiveZeroCostCount = 0;
+  for (const variant of EXIT_VARIANTS) {
+    const replayed = allTrades.map((t) => {
+      const symbol = tradeSymbol.get(t)!;
+      const data = tokenData.get(symbol)!;
+      const r = replayExit(data.candles, data.rsi, t.entryIndex, t.entryPrice, data.tokenCfg, variant, cfg.global.exitSlippagePct);
+      const grossPnlSol = t.sizeSol.toNumberUnsafe() * (r.grossPnlPct / 100);
+      const costsSol = t.costsSol.toNumberUnsafe();   // unchanged entry-time cost basis
+      return { grossPnlSol, netPnlSol: grossPnlSol - costsSol, exitReason: r.exitReason, replay: r, original: t };
+    });
+
+    if (variant.label.startsWith('control')) {
+      const mismatches = replayed.filter((x) =>
+        x.replay.exitIndex !== x.original.exitIndex || x.replay.exitReason !== x.original.exitReason ||
+        Math.abs(x.replay.exitPrice - x.original.exitPrice) > 1e-6,
+      );
+      console.log(
+        `  [control self-check: ${replayed.length - mismatches.length}/${replayed.length} trades reproduce the ` +
+        `original exactly${mismatches.length > 0 ? ' — MISMATCH: do not trust this comparison' : ' — OK'}]`,
+      );
+    }
+
+    const costed = quickStats(replayed.map((x) => x.netPnlSol));
+    const zeroCost = quickStats(replayed.map((x) => x.grossPnlSol));
+    if (!variant.label.startsWith('control')) {
+      if (costed.expectancy > 0) positiveCostedCount++;
+      if (zeroCost.expectancy > 0) positiveZeroCostCount++;
+    }
+    const reasons = new Map<string, number>();
+    for (const x of replayed) reasons.set(x.exitReason, (reasons.get(x.exitReason) ?? 0) + 1);
+
+    console.log(
+      `${variant.label.padEnd(27)} ${sig(costed.expectancy).padStart(8)}    ${sig(zeroCost.expectancy).padStart(11)}    ` +
+      `${pct(costed.winRate).padStart(8)}    ${pct(zeroCost.winRate).padStart(11)}     ` +
+      `${sig(costed.profitFactor, 2).padStart(8)}   ${sig(zeroCost.profitFactor, 2).padStart(8)}`,
+    );
+    console.log(`    exit reasons: ${[...reasons.entries()].map(([k, v]) => `${k}=${v}`).join(', ')}`);
+  }
+
+  console.log(
+    `\n  ${positiveZeroCostCount} of 4 alternative exits produced positive ZERO-COST expectancy; ` +
+    `${positiveCostedCount} of 4 produced positive COSTED expectancy.\n` +
+    '  This is a count, not a verdict — restated per the curve-fitting warning above: none positive\n' +
+    '  is decisive (no edge, stop). Several positive means a proper out-of-sample sweep is\n' +
+    '  justified, not that any specific variant here is validated.',
+  );
 
   console.log(
     '\nNOTE (CLAUDE.md hard rule): report the numbers above and their limitations; do not conclude\n' +
