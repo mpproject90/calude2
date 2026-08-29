@@ -1016,3 +1016,87 @@ outcomes about 19% of the time by chance alone, unremarkable at n=2. The
 conjunction (prior-overbought AND cross-up AND MFI-confirm, together) being
 rare is a genuinely rare CONJUNCTION of three independent-ish conditions,
 not evidence any single one of them — MFI included — is set wrong.
+
+## 32. `data:screen`: cheap multi-token funnel counts to find a pooled sample, and what six real tokens showed
+
+**§31 killed the relative-strength hypothesis** (a follow-up funnel measurement,
+not written up as its own numbered section: JUP 254→2 reliable-to-cross-up,
+SOL/USDC 1609→11, both ~0.7-0.8%; relative-strength discriminated correctly
+on both of JUP's two near-misses). The bottleneck is the RSI cross-up itself,
+which fires roughly 1% of the time on a liquid series. One token's 179-day
+window is too short to collect enough cross-ups to say anything about
+expectancy. The only lever left without waiting on more calendar time (the
+180-day free-tier ceiling, §29) is pooling across multiple tokens — with the
+explicit risk that correlated tokens dipping together on a shared SOL move
+is one event counted several times, not several independent events.
+
+**Built `data:screen`** (`src/cli/screen.ts`, `src/backtest/funnel.ts`,
+`resolveCheapestPool` in `src/data/poolResolution.ts`) to make checking that
+cheap: one discovery call and ONE candidate's OHLCV pagination per token
+(highest current `reserveUsd`, no dominance/migration comparison — that
+rigor is what `data:fetch` is for), reusing `computeEntryFunnel`, which calls
+the exact same primitives `runBacktest`'s entry path uses
+(`wasOverboughtWithin`, `crossedUpThrough`, `evaluateRelativeStrength`,
+`evaluateRegime`) in the same order, so the funnel counts cannot drift from
+what a real backtest would evaluate. No trades, no PnL — coverage, gaps,
+longest reliable stretch, and stage counts only.
+
+**Six tokens chosen for the live run**, deliberately spanning categories
+rather than six meme coins that would all move together: JTO (Jito —
+liquid-staking infra), PYTH (oracle infra), RAY (Raydium's own token — one
+of the oldest, most continuously liquid pools on Solana), ORCA (Orca's own
+token, same reasoning), WIF and BONK (the two highest-liquidity Solana
+meme coins, included because they're liquid, not despite being memes). All
+six mint addresses were verified against independent sources before use.
+Interval 1h, 179 days, SOL/USDC reference pinned once and shared (§30).
+
+**Result: two of six tokens returned unusable data, and the cheap pool
+selection is why.**
+
+| Token | Coverage | Gaps | Longest reliable stretch | Chosen pool reserveUsd |
+|---|---|---|---|---|
+| JTO | 22.71% | 209 | 5 | $43,775 |
+| BONK | 18.41% | 244 | 0 | $124,630 |
+| WIF | 99.56% | 19 | 1065 | $5,630,016 |
+| PYTH | 99.74% | 11 | 1806 | $384,016 |
+| RAY | 96.63% | 127 | 302 | $3,154,162 |
+| ORCA | 85.99% | 391 | 269 | $764,290 |
+
+JTO's and BONK's chosen pools are two to three orders of magnitude thinner
+than WIF's or RAY's — both tokens have deep SOL pools in reality, but
+`resolveCheapestPool`'s one-shot "highest current reserveUsd among whatever
+`searchPools` returned" heuristic picked a shallow one, and a shallow pool
+has enough missing/rejected candles that its reliability mask almost never
+opens (BONK: 0 reliable bars in 4297; JTO: 5). This is a limitation of the
+cheap path, not a finding about JTO or BONK's tradability — screen data at
+this coverage isn't a "the strategy doesn't fire on JTO" result, it's a
+"the cheap resolver didn't find JTO's real pool" result. Read the funnel
+counts for JTO/BONK as inconclusive, not as zero-signal.
+
+**Funnel counts, the four tokens with usable coverage (>85%):**
+
+| Token | Reliable | Prior-OB | Cross-up | MFI-confirm | Rel-strength | Regime |
+|---|---|---|---|---|---|---|
+| WIF | 3408 | 951 | 1 | 0 | 0 | 0 |
+| PYTH | 3694 | 1080 | 4 | 4 | 2 | 1 |
+| RAY | 1619 | 330 | 0 | 0 | 0 | 0 |
+| ORCA | 363 | 185 | 1 | 0 | 0 | 0 |
+
+Pooled across all six tokens: 6 cross-up events total in 179 days, and only
+one (PYTH) ever reached a full regime-pass. Pooling six liquid tokens did
+not turn a rare per-token signal into a workable sample — it turned four
+usable tokens' rare signals into six events, most of which still failed a
+downstream filter individually.
+
+**Clustering check (the operator's explicit risk), and the finding is the
+opposite of the worry:** the 6 pooled cross-ups landed on 6 distinct UTC
+days — no two events, even across different tokens, shared a day. There is
+no evidence here of one shared SOL-driven move being counted six times. The
+actual concentration risk is different: 4 of the 6 events are the same
+token (PYTH), so the tiny sample is dominated by one asset's history rather
+than being diversified across six. Six independent-by-day events from four
+tokens, one of which supplies two-thirds of them, is still too thin to
+estimate expectancy — it answers "is this worth a full run" (yes, PYTH looks
+like the best-populated single candidate so far) not "does this make
+money," which §-rule (`CLAUDE.md`) forbids concluding from counts alone
+regardless.

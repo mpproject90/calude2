@@ -5,13 +5,16 @@ conversation history, this tells you where the project stands and what happens
 next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
-**Last updated:** end of phase 1 step 6. GeckoTerminal replaced Binance as the
-default data provider (DECISIONS §18–§23); the first real fetch found and fixed
-two bugs (§24–§26) and the operator unblocked step 6; the backtest engine is
-now built and has run once against the real 90-day JUP/SOL data, producing
-zero trades for a documented, non-strategy reason (§27) — see "First real
-backtest run" below. Verified against `main` by clean clone and
-tree-versus-index diff.
+**Last updated:** still phase 1 step 7 (STOP — awaiting operator review), but
+a lot has been measured since the 90-day 0-trade result. Engine validated
+against a gap-free control, the gap-shadow window recalibrated (§28), a real
+cache-contamination bug found and fixed with pool pinning + a schema
+migration (§29–§30), a 179-day pinned run still found only 2 near-misses and
+cleared MFI's calibration (§31), and — most recently — a cheap multi-token
+`data:screen` mode was built and run against 6 real Solana tokens to test
+whether pooling tokens gives a usable sample without waiting on more
+calendar time (§32, "Multi-token screen" below). Verified against `main` by
+clean clone and tree-versus-index diff after every push.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -140,7 +143,7 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates |
 | Rules | `src/rules/` | entry conditions, intrabar exits, portfolio limits |
 | Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
-| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `backtest` |
+| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `backtest` |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
 
 **Nothing here can place a trade.** There is no execution layer and no code path
@@ -346,6 +349,69 @@ entry conjunction (three conditions that each fire independently but rarely
 align) is warranted — not decided here (CLAUDE.md hard rule: report, don't
 conclude).
 
+## Third measurement — relative-strength hypothesis killed, then a multi-token screen (§32)
+
+A follow-up funnel measurement (same reusable primitives as the engine, no
+backtest run) tested the operator's hypothesis that relative-strength was
+structurally rejecting SOL-driven correlated dips — the likely explanation
+for the 179-day run's 2 near-misses. **Killed**: on the gap-free SOL/USDC
+series, RSI-cross-up itself is the bottleneck (1609 reliable bars → 11
+cross-ups, ~0.7%), matching JUP's 254→2 rate on an independent series, and
+relative-strength discriminated correctly on both of JUP's real near-misses
+(rejected the correlated one, passed the genuine dislocation). The
+conjunction is rare because the base rate of the setup is rare, not because
+any one filter is misconfigured.
+
+Since one token's 179-day window is too short a base to draw an expectancy
+conclusion from 1-2 events, and the 180-day free-tier ceiling blocks getting
+more from *more calendar time*, the only remaining lever is pooling multiple
+tokens — with an explicit risk the operator flagged in advance: correlated
+tokens dipping together on one shared SOL move is one event counted several
+times, not several independent ones.
+
+**Built `npm run data:screen`** — cheap, no-backtest coverage/gap/funnel
+counts per token, so a candidate can be screened before committing to a full
+`data:fetch` + `backtest` run. `resolveCheapestPool` (one discovery call,
+one candidate's OHLCV pagination — the highest current `reserveUsd`, no
+dominance check) trades rigor for speed relative to `data:fetch`'s resolver;
+`computeEntryFunnel` calls the exact same entry primitives the real engine
+does, in the same order, so screen counts cannot drift from what a backtest
+would find.
+
+**Run against 6 real Solana tokens, 1h, 179 days** (JTO, PYTH, RAY, ORCA,
+WIF, BONK — chosen to span categories rather than six correlated meme
+coins; full reasoning and per-token tables in DECISIONS §32):
+
+| Token | Coverage | Reliable | Cross-up | MFI-confirm | Rel-strength | Regime |
+|---|---|---|---|---|---|---|
+| JTO | 22.71% | 5 | 0 | 0 | 0 | 0 |
+| BONK | 18.41% | 0 | 0 | 0 | 0 | 0 |
+| WIF | 99.56% | 3408 | 1 | 0 | 0 | 0 |
+| PYTH | 99.74% | 3694 | 4 | 4 | 2 | 1 |
+| RAY | 96.63% | 1619 | 0 | 0 | 0 | 0 |
+| ORCA | 85.99% | 363 | 1 | 0 | 0 | 0 |
+
+**JTO and BONK's screen data is unusable** — the cheap resolver's "highest
+current reserveUsd" heuristic picked pools two to three orders of magnitude
+thinner than these tokens' real liquidity, so their reliability masks almost
+never open. Read those two rows as "the cheap resolver didn't find the real
+pool," not as a signal-density finding — `data:fetch`'s rigorous resolver
+would need to be run before drawing any conclusion about JTO or BONK.
+
+**Pooled across all six: 6 cross-up events total in 179 days, one full
+regime-pass (PYTH).** Clustering check (the operator's explicit request):
+the 6 events landed on 6 distinct UTC days — no two, even across different
+tokens, shared a day, so there is no evidence of one shared SOL-wide move
+being counted multiple times here. The actual concentration is different:
+4 of the 6 events are PYTH alone, so the sample is dominated by one token's
+history, not diversified across six. Still far too thin for an expectancy
+conclusion — it answers "which candidate is worth a full run" (PYTH, so
+far, on data volume alone), not "does this make money."
+
+**Awaiting operator direction** on whether to run `data:fetch` + `backtest`
+against PYTH specifically, re-screen JTO/BONK with the rigorous resolver, add
+more tokens to the screen, or something else.
+
 ## What is deliberately NOT built
 
 - **DexPaprika's pool-discovery/selection integration** — the provider client
@@ -447,9 +513,10 @@ zero (see above):
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 247
-cases across 10 files: `data` 77, `rules` 45, `backtest` 31, `filters` 29,
-`indicators` 21, `config` 14, `repo-hygiene` 10, `amount` 8, `logger` 8, `db`
-4. `data` grew from 45 to 77 with the GeckoTerminal/DexPaprika providers,
-pool selection and wick/ATR diagnostics (DECISIONS §18–§26); `backtest` is
-new (§27); `repo-hygiene` grew from 9 to 10 with the `.claude/` ignore check.
+Counts are **test cases**, as reported by vitest — never assertions. 260
+cases across 10 files: `data` 80, `backtest` 36, `rules` 45, `filters` 29,
+`config` 17, `indicators` 23, `repo-hygiene` 10, `amount` 8, `logger` 8, `db`
+4. `data` grew to 80 with the schema-v2 pool-coexistence tests (§29–§30);
+`backtest` grew to 36 with the entry-funnel tests (§32); `indicators` and
+`config` grew with the warm-up-multiplier and pool-pinning schema changes
+(§28–§30).
