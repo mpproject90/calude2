@@ -31,6 +31,7 @@ import { INTERVAL_MS, INTERVALS, type Candle, type Interval } from '../types/ind
 import { BinanceHistoricalCandleProvider, type MonthFetchedEvent } from '../data/providers/binanceHistorical.js';
 import { synthesizeRatioSeries } from '../data/synthesize.js';
 import { computeEntryFunnel, type CrossUpEvent } from '../backtest/funnel.js';
+import { declusterAtWindows } from '../backtest/decluster.js';
 import { parseConfig } from '../config/load.js';
 import { formatErrorChain } from '../util/errorChain.js';
 
@@ -280,6 +281,22 @@ async function main(): Promise<void> {
     `  judging expectancy is bounded above by the distinct-day count, not the raw event count, to the\n` +
     '  extent multiple tokens fire on the same day for the same reason (a shared SOL move). The busiest-\n' +
     '  days list above is what to check before trusting any per-trade statistic computed from this pool.',
+  );
+
+  console.log('\n=== DECLUSTERING (DECISIONS §35) — chain-merge events within a rolling window ===');
+  console.log('window(d)  raw   effective   3+distinct-token clusters');
+  const summaries = declusterAtWindows(
+    pooled.map((e) => ({ token: e.symbol, timestamp: e.timestamp })), [1, 2, 3, 7],
+  );
+  for (const s of summaries) {
+    console.log(
+      `${String(s.windowDays).padStart(9)}  ${String(s.rawEventCount).padStart(4)}   ` +
+      `${String(s.effectiveCount).padStart(9)}   ${String(s.threePlusTokenClusters).padStart(5)}`,
+    );
+  }
+  console.log(
+    '\n  Use the effective count at whichever window is chosen as the honest sample size —\n' +
+    '  not the raw event count — in anything that follows.',
   );
 }
 

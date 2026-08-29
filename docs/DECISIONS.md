@@ -1267,3 +1267,63 @@ count:**
 script stops at reporting the event count and clustering — designing an
 in-sample/out-of-sample sweep against these 356 (or ~210 effective) events
 is the next, separate decision.
+
+## 35. Declustering the 356 pooled events: 137 effective at the chosen 2-day window
+
+**§34 quantified real cross-token clustering but did not correct for it** —
+210 distinct days is an upper bound, not the honest independent sample
+size. Operator direction: implement declustering (events within a rolling
+window collapse to one), test windows of 1/2/3/7 days, report the effective
+count and how many clusters span 3+ distinct tokens at each, choose one, and
+quote the declustered count everywhere from here on — not the raw 356.
+
+**Built `decluster()`/`declusterAtWindows()`** (`src/backtest/decluster.ts`).
+CHAIN declustering, not fixed bins: sort events by time, and an event joins
+the current cluster if it falls within the window of the MOST RECENT event
+already in that cluster, not the cluster's first event — so a cluster's
+total span can exceed the window if events keep arriving inside it. This is
+the standard approach for this kind of runs-based declustering (the same
+shape as seismic aftershock declustering) and avoids the artifact a fixed
+bin would introduce: splitting one continuous cluster in two just because it
+crosses a bin boundary. Documented as a deliberate choice, not the only
+possible one — see the module's header comment.
+
+**Result, at each window (356 raw events, 7 tokens, full listed history):**
+
+| Window | Effective count | Reduction | Clusters with 3+ distinct tokens |
+|---|---|---|---|
+| 1 day | 160 | 55% | 13 |
+| 2 days | 137 | 61% | 18 |
+| 3 days | 123 | 65% | 21 |
+| 7 days | 64 | 82% | 28 |
+
+**Chosen: the 2-day window — 137 is the honest sample size, not 356 or 210.**
+Two independent reasons, not one:
+
+1. **It matches the strategy's own definition of "the same cycle."**
+   `entry.priorOverboughtWithinCandles = 50` (hours, at 1h) = 2.08 days is
+   already how the entry rule itself decides whether a cross-up belongs to
+   the same overbought-then-reverted cycle as a prior peak. Declustering at
+   a window the strategy already treats as "one episode" is a principled
+   anchor, not an arbitrary round number.
+2. **The decay is smooth through 3 days and then falls off a cliff at 7.**
+   160→137→123 (1d→2d→3d) is a steady, proportionate reduction as the window
+   widens. 123→64 (3d→7d) nearly halves the count again in one step — at
+   356 pooled events over roughly 2.4 years combined, the mean pooled
+   inter-arrival gap is already under 2.4 days, so a 7-day window is wide
+   enough that chains rarely terminate: it isn't finding more genuine shared
+   episodes, it's running into density-driven chain runaway, silently
+   merging causally-unrelated later signals into one earlier cluster. 2-3
+   days sits before that cliff; 7 does not.
+
+**This does not fully resolve the clustering question, and says so
+explicitly:** even at 2 days, 18 of 137 clusters (13%) still span 3+
+distinct tokens — real, not eliminated, contamination. 137 is this study's
+best honest estimate of the independent sample size, not a claim the
+remaining clusters are clean.
+
+**From here on, 137 (not 356) is the number quoted as the sample size** for
+anything built on top of this pooled event set, per operator direction —
+the same declustering is applied to actual backtest TRADES (a smaller,
+downstream population after MFI/relative-strength/regime/cost-floor/
+portfolio filtering) in §36.
