@@ -710,3 +710,105 @@ ratio was noise dressed up as a finding.
 originally looked alarming is not evidence against trusting MFI/ATR on this
 token. Whatever concern remains rests on the ATR-outlier count, which was
 already clean.
+
+## 27. Backtest engine: scope decisions and the first real result
+
+Step 6 (spec §10), unblocked by the operator after DECISIONS §24–§26's
+findings were resolved. `src/backtest/engine.ts` replays candles through the
+same `evaluateEntry`/`evaluateExit`/`checkPortfolioLimits`/filter functions
+already tested in isolation — no duplicated strategy logic (spec §10, §16).
+Several things had no existing precedent to follow and needed a decision:
+
+**`tier-gates` is not called per bar.** It is a watchlist gate — does this
+token even belong on the list at all — not a per-bar trading signal, and
+`rules.test.ts`'s own example filter sets never included it either. The
+operator configuring a token as `tier: A` already represents that decision.
+
+**Historical pool liquidity does not exist** (§19), so `positionSize.ts`'s
+§6.4 cap — which fails closed by design without it, correctly for live/paper
+— would silently zero out every trade in a backtest and look exactly like "no
+signal ever fired," burying the real cause. `BacktestInput.poolLiquiditySol`
+accepts a constant snapshot (e.g. the pool's `reserveUsd` from `data:fetch`'s
+output, converted to SOL) to evaluate the cap approximately across the whole
+window, or `null` to skip it — in which case every bar's position-size check
+is replaced with an explicit `pass(...)` carrying that reason, so the
+omission shows up in `rejectedByFilter` as zero rather than vanishing
+silently. `costFloor.ts`'s slippage estimate already had a graceful fallback
+for `poolLiquiditySol: null` and needed no special-casing.
+
+**Relative strength reconstructs a real JUP/USD-equivalent close** —
+`candles[i].close * solCandles[i].close` (JUP/SOL × SOL/USD = JUP/USD, exact
+for closes, same reasoning as §6's "close is EXACT" argument for a
+synthesized series) — rather than feeding the filter a placeholder. This
+matters because §20 changed the filter's pass/fail math to the JUP/SOL
+series' own return, which makes SOL's absolute price irrelevant to the
+DECISION, but `tokenReturn`/`solReturn` are still logged separately every
+evaluation specifically so beta can be estimated later (§5, §20) — a
+placeholder series would have made that logging fake. Verified algebraically
+and by test: the reconstruction's `differential` reduces to exactly the
+JUP/SOL series' own return regardless of SOL's price path, because the SOL
+terms cancel in `(1+tokenReturn)/(1+solReturn)`.
+
+**Regime alignment is look-ahead-free across timeframes** — the regime
+filter reads SOL's trend on a HIGHER timeframe (`solMaTimeframe`, default
+4h) than the token trades. `src/data/aggregate.ts` downsamples the cached
+SOL series (only ever fetched at the token's own interval) into that
+timeframe, dropping any bucket that doesn't have the exact expected bar
+count rather than aggregating from a partial one. `src/backtest/
+regimeAlignment.ts` then finds, for each token bar, the last regime bucket
+that had fully CLOSED at or before that bar's timestamp — the same look-
+ahead discipline as filling at the next candle's open, applied to a place it
+would be easy to miss. On the real 90-day JUP window: aggregating the
+GAPLESS SOL/USDC series into 4h buckets drops only 2 of 541 (boundary
+effects); aggregating JUP's own 150-gap series the same way would drop 144 —
+irrelevant to regime specifically, since regime is built from SOL, not the
+traded token, but recorded here because it was asked about directly.
+
+**Cost model:** DEX fee + slippage (real if `poolLiquiditySol` given, else
+`fallbackSlippagePct`) + priority fee + Jito tip are computed ONCE per trade
+via the existing `estimateRoundTripCost`, using the position size, and
+deducted as a single round-trip SOL amount from gross P&L at exit — not
+split into two separate price adjustments at entry and exit. Entry fills at
+the next bar's open with NO slippage baked into the recorded price (spec
+§10's "fills at the next candle's open" is taken literally); stop/trailing
+exits already carry their own, separately-configured slippage
+(`global.exitSlippagePct`) from `exit.ts`, unchanged, not double-applied.
+
+**A position still open when the data runs out force-closes** at the last
+bar's close, reason `end_of_data` — a backtest-boundary artifact, reported
+separately and never counted in the spec §10 exit-trigger breakdown
+(stop/time/RSI/trailing), but its P&L still counts toward the ending
+balance so the books close.
+
+**Not persisted to the `positions` table.** A backtest is a stateless,
+one-shot replay — unlike paper/live, which need the table's crash-recovery
+property (spec §3: a restart must not lose position state). The schema is
+ready for it if the operator later wants to persist and compare multiple
+backtest runs; not built because it wasn't needed for this one.
+
+### First real result: 0 trades, and why
+
+Run via `npm run backtest -- --symbol JUP` against the operator-approved
+90-day JUP/SOL data (DECISIONS §24–§26). **Zero trades — not a strategy
+verdict, a data-density one.** 92.4% of entry evaluations (1823 of 1973
+bars) were blocked because RSI/MFI were not `reliable`. Broken down by
+reason (`BacktestResult.indicatorUnreliableByReason`, added specifically so
+this is a first-class report number rather than an ad-hoc calculation): 1726
+of those (94.7%) were `gap-in-series`, only 97 `insufficient-warmup`. A gap
+invalidates a full trailing warm-up window BEHIND it, not just the bar after
+it (§10, `indicators/core.ts`) — with 150 gaps scattered through the 90-day
+window (§24's "genuinely quiet pool" finding), that shadow covers most of
+the series. The longest consecutive fully-reliable stretch is only 76 bars,
+never a complete 98-bar (`period(14) × warmupMultiplier(7)`) window.
+
+**This is the fail-closed rule working exactly as designed** — the operator
+asked to see how often it fires, and it fires almost constantly on this
+specific pool at this specific interval. It is not evidence the strategy
+lacks edge; it is evidence this particular JUP/SOL pool, at 1h, does not
+give RSI/MFI enough gap-free runway to ever reach a trustworthy reading.
+Options that were NOT decided here, left for the operator: a coarser
+interval (4h has far fewer bars to begin with, and gaps driven by quiet
+weekend HOURS may or may not survive proportionally into 4h buckets — not
+measured), a less gap-prone pool, a smaller `indicatorWarmupMultiplier`, or
+accepting the result as-is. Report the number; the operator draws the
+conclusion (CLAUDE.md hard rule).

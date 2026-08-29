@@ -8,11 +8,13 @@ Not a sniper, not a copy-trading bot, not an MEV bot. Speed is not the edge —
 discipline and filtering are. Token selection is manual: you paste contract
 addresses, and the bot only decides *when* to enter and exit within them.
 
-> **Status: phase 1, steps 1–5 of 10. Nothing here can place a trade.**
+> **Status: phase 1, steps 1–6 of 10. Nothing here can place a trade.**
 > There is no execution layer and no code path submits a transaction.
-> No backtest has run, so no result about profitability exists.
+> The backtest engine is built and has run once against real data — result:
+> zero trades, for a documented data-density reason, not a strategy verdict.
+> No claim about profitability has been made and none should be inferred.
 >
-> **Step 6 is blocked** on a local data-layer review — see `docs/STATUS.md`.
+> **Step 7 (STOP): awaiting operator review** — see `docs/STATUS.md`.
 
 ## Read these first
 
@@ -40,7 +42,7 @@ npm run config:check -- config/default.yaml
 npm test
 ```
 
-Expected: `config/default.yaml is valid`, and 216 test cases passing across 9
+Expected: `config/default.yaml is valid`, and 247 test cases passing across 10
 files (see `docs/STATUS.md` for the breakdown). Nothing above needs network
 access beyond the npm registry.
 
@@ -53,6 +55,7 @@ npm run typecheck         # tsc --noEmit
 npm run build             # compile to dist/
 npm run config:check -- config/default.yaml
 npm run data:fetch -- --symbol JUP --interval 1h --days 90
+npm run backtest -- --symbol JUP                 # needs data:fetch's cache; no network itself
 ```
 
 ## Configuration
@@ -140,7 +143,8 @@ CLAUDE.md             entry point for a fresh session
 docs/SPEC.md          original requirements
 docs/DECISIONS.md     design decisions and their reasoning
 docs/STATUS.md        build state, blockers, what is unverified
-src/cli/              config:check and data:fetch entry points
+src/backtest/          engine (spec §10), summary metrics, regime timeframe alignment
+src/cli/              config:check, data:fetch and backtest entry points
 src/config/           zod schema, loader, live-trading gate
 src/data/             providers, cache, validation, gap detection, pool selection
 src/data/providers/   GeckoTerminal (default), Binance (alternate), DexPaprika (stub)

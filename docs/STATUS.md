@@ -5,13 +5,13 @@ conversation history, this tells you where the project stands and what happens
 next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
-**Last updated:** end of phase 1 step 2, plus the documentation and durability
-pass, plus the GeckoTerminal provider switch (DECISIONS §18–§23: Binance is
-regionally blocked for this project's operator, GeckoTerminal is now the
-default data provider), plus the first real GeckoTerminal fetch and the two
-bugs it surfaced and fixed (DECISIONS §24–§25) — see "First real GeckoTerminal
-review" below for the numbers, still pending the operator's judgment. Verified
-against `main` by clean clone and tree-versus-index diff.
+**Last updated:** end of phase 1 step 6. GeckoTerminal replaced Binance as the
+default data provider (DECISIONS §18–§23); the first real fetch found and fixed
+two bugs (§24–§26) and the operator unblocked step 6; the backtest engine is
+now built and has run once against the real 90-day JUP/SOL data, producing
+zero trades for a documented, non-strategy reason (§27) — see "First real
+backtest run" below. Verified against `main` by clean clone and
+tree-versus-index diff.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -20,14 +20,12 @@ you have everything.
 
 ## THE NEXT ACTION IS NOT THE ASSISTANT'S
 
-**Step 6 (the backtest engine) is blocked**, and not on anything the assistant
-can do. The operator must run the data layer against real candles on their own
-machine and report back.
-
-**This is blocked on machine access, not on work.** The operator is on a browser
-without access to their PC, and this may be days away. That is expected. **Do not
-start step 6. Do not build speculatively while waiting.** Resuming from a clean,
-documented state is preferable to finding unevaluable work.
+**Step 7 (spec §15): STOP — report backtest results, await operator review.**
+Step 6 is built and has run once against real data. The result was **zero
+trades**, for a specific, documented reason — not a verdict on the strategy
+(DECISIONS §27, "First real backtest run" below). **Do not tune parameters,
+change the interval, pick a different pool, or otherwise react to this result
+without the operator's direction. Do not start phase 2 (paper trading).**
 
 ### Commands the operator runs (locally)
 
@@ -38,19 +36,20 @@ npm install
 npm test                  # see the test-count table at the bottom of this file, all passing
 
 npm run data:fetch -- --symbol JUP --interval 1h --days 90
-npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db --address <JTO's Solana mint>
+npm run backtest -- --symbol JUP
 ```
 
 Default provider is **GeckoTerminal** (`api.geckoterminal.com`, free, no key —
 DECISIONS §18), chosen because Binance is regionally blocked for this
 project's operator. Needs the token's mint address to find its pools — JUP
 resolves from `config/default.yaml`'s `tokens[]` with no flag needed; any other
-token (JTO included, not yet in the config) needs `--address <mint>`. `--provider binance` remains available for
+token needs `--address <mint>`. `--provider binance` remains available for
 anyone who can reach `api.binance.com`, using the original synthesis path
 (DECISIONS §6, §14). **Neither will run in a sandboxed cloud environment that
-blocks its host** — that is expected, not a bug.
+blocks its host** — that is expected, not a bug. `npm run backtest` needs
+candles already cached by `data:fetch` first; it does not touch the network.
 
-### What to report back — GeckoTerminal path (default)
+### What to report back from `data:fetch` — GeckoTerminal path (default)
 
 | # | Signal | Expected | If not |
 |---|---|---|---|
@@ -100,9 +99,10 @@ leaves material distortion should MFI's role be reconsidered.
 
 ## What is built
 
-**Phase 1, steps 1–5 of 10.** See the test-count table at the bottom of this
-file for the current suite size. **Typecheck clean** under `strict`,
-`noImplicitAny`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`.
+**Phase 1, steps 1–6 of 10, step 7 (STOP) is now.** See the test-count table
+at the bottom of this file for the current suite size. **Typecheck clean**
+under `strict`, `noImplicitAny`, `noUncheckedIndexedAccess`,
+`exactOptionalPropertyTypes`.
 
 ```
 ✓ 1. Scaffold, config schema + validation, SQLite, .gitignore with .env
@@ -111,8 +111,11 @@ file for the current suite size. **Typecheck clean** under `strict`,
 ✓ 3. Indicator engine with warm-up gating and reference-value tests
 ✓ 4. Filter stack, each filter independently tested
 ✓ 5. Rules engine (entry/exit) against synthetic candle series
-□ 6. Backtest engine with realistic cost modelling      ← BLOCKED, see above
-□ 7. STOP — report results, await operator review
+✓ 6. Backtest engine — same indicator/filter/rules code as live, fills at
+     next open, MFE distribution, exit trigger breakdown, in/out-of-sample
+     split, rejection counts per filter. Run once against real JUP data:
+     0 trades, for a documented reason (DECISIONS §27) — see below.
+■ 7. STOP — report results, await operator review           ← HERE NOW
 □ 8. Paper trading mode
 □ 9. STOP — run for weeks, await operator review
 □ 10. Live execution layer, on explicit approval only
@@ -136,7 +139,8 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Indicators | `src/indicators/` | RSI, MFI, ATR; warm-up gating; `{value, reliable, reason}` |
 | Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates |
 | Rules | `src/rules/` | entry conditions, intrabar exits, portfolio limits |
-| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`) |
+| Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
+| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `backtest` |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
 
 **Nothing here can place a trade.** There is no execution layer and no code path
@@ -146,7 +150,7 @@ submits a transaction.
 
 **GeckoTerminal (default) has now made real requests and been reviewed once**
 — see "First real GeckoTerminal review" below for the numbers and DECISIONS
-§24–§25 for what that run found and fixed. It is no longer purely
+§24–§26 for what that run found and fixed. It is no longer purely
 mock-verified, but it has been reviewed exactly once, against one token
 (JUP), one interval (1h), one 90-day window — treat that as a first data
 point, not a settled verification. **Binance (alternate) has still never made
@@ -157,11 +161,14 @@ The failure path is known-good for both, and now carries more than a bare
 message: a blocked host, a bad HTTP status, or a raw network/TLS failure all
 throw with the request URL and the full error `cause` chain attached
 (DECISIONS §22) — `fetch-data.ts`'s top-level handler prints all of it via
-`formatErrorChain`, not just `err.message`. This is what made the §24/§25
+`formatErrorChain`, not just `err.message`. This is what made the §24–§26
 findings diagnosable in the first place rather than just "it failed."
 
-**No backtest has ever run, so no strategy result of any kind exists. No claim
-about profitability has been made and none should be inferred.**
+**A backtest has now run once, and produced zero trades — no strategy result
+of any kind exists yet, because no trade ever fired.** See "First real
+backtest run" below for why (a data-density finding, not a strategy one).
+No claim about profitability has been made and none should be inferred —
+there is nothing yet to draw one from.
 
 ## First real GeckoTerminal review — JUP, 1h, 90 days (2026-08-29)
 
@@ -231,8 +238,61 @@ the above.
 
 **Operator decision: step 6 is unblocked.** 0 rejected candles, gaps real and
 explained (flagged not interpolated, never traversed silently), 1 ATR-outlier
-bar in 1875, SOL/USDC reference at 100% coverage. Proceeding to build the
-backtest engine — see "What is built" below for progress.
+bar in 1875, SOL/USDC reference at 100% coverage. Proceeded to build the
+backtest engine.
+
+## First real backtest run — JUP, 1h, 90 days
+
+`npm run backtest -- --symbol JUP` against the same real data reviewed above.
+**Result: 0 trades. Not a strategy verdict — a data-density one, and the
+fail-closed rule the operator specifically asked to watch for firing exactly
+as designed (DECISIONS §27).**
+
+| | |
+|---|---|
+| Entry evaluations (bars where flat, looking for a signal) | 1973 |
+| Blocked — indicators not `reliable` | 1823 (92.40% of evaluations) |
+| &nbsp;&nbsp;of those: `gap-in-series` | 1726 (94.7%) |
+| &nbsp;&nbsp;of those: `insufficient-warmup` | 97 (5.3%) |
+| Longest consecutive fully-reliable stretch | 76 bars (never a full 98-bar `period(14)×warmupMultiplier(7)` window) |
+| Blocked — no prior overbought cycle | 88 |
+| Blocked — no RSI cross-up | 61 |
+| Blocked — MFI did not confirm | 1 |
+| Trades | 0 |
+
+**Why:** a gap invalidates a full trailing warm-up window BEHIND it, not just
+the bar after it (`indicators/core.ts`, by design, tested — DECISIONS §10).
+With 150 gaps scattered through the 90-day window (the "genuinely quiet pool"
+finding above), that shadow covers most of the series — 1726 of 1823 blocked
+bars, dwarfing the 97 from plain initial warm-up. This is `BacktestResult.
+indicatorUnreliableByReason`, added specifically so this split is a
+first-class report number rather than something computed ad hoc.
+
+**This is not evidence the strategy lacks edge.** It is evidence this
+specific JUP/SOL pool, at 1h, does not give RSI/MFI enough gap-free runway to
+ever reach a trustworthy reading. Options NOT decided here, left for the
+operator (DECISIONS §27): a coarser interval, a less gap-prone pool, a
+smaller `indicatorWarmupMultiplier`, or accepting the result as-is and moving
+to a different token. **Awaiting operator direction — do not act on any of
+these without it.**
+
+Also built into the engine, not yet exercised by a real trade: exact fill-at-
+next-open timing, round-trip cost deduction from gross P&L, MFE tracking from
+the real intrabar peak, force-close of a still-open position at series end
+(`end_of_data`, never counted as a real exit trigger), and the full spec §10
+metrics suite (expectancy, win rate, profit factor, max drawdown, longest
+losing streak, exit trigger breakdown, MFE distribution, cost totals,
+in-sample/out-of-sample split, minimum-trade-count warning) — all tested
+against hand-computed numbers, none yet exercised against a real trade
+because none has happened.
+
+**Two scope decisions from the build, both documented in DECISIONS §27:**
+`tier-gates` is not evaluated per bar (a watchlist gate, not a signal — the
+token's `tier: A` config already represents that check); the §6.4
+position-size cap needs historical pool liquidity that doesn't exist for
+free, so it runs only with `--pool-liquidity-sol <amount>` supplied, and is
+explicitly marked "not evaluated" (never silently skipped) otherwise — this
+run used no liquidity figure, so the cap was not enforced.
 
 ## What is deliberately NOT built
 
@@ -253,31 +313,54 @@ backtest engine — see "What is built" below for progress.
   survivorship-bias-free historical data.
 - **Birdeye** — skipped; free tier too thin, and unnecessary once Tier B was
   deferred.
-- **Dashboard** (SPEC §14) — not started. Comes after a backtest exists.
+- **Trades persisted to the `positions` table** — the backtest engine returns
+  its trade list in memory and the CLI prints a report; nothing is written to
+  SQLite. A backtest is a stateless one-shot replay, unlike paper/live which
+  need the table's crash-recovery property. The schema is ready if repeated-
+  run comparison is wanted later (DECISIONS §27).
+- **`tier-gates` evaluated per bar in the backtest** — it is a watchlist gate
+  (does this token qualify for its tier at all), not a per-bar signal; not
+  called by the engine. The operator configuring `tier: A` already represents
+  that decision (DECISIONS §27).
+- **The §6.4 position-size cap, without an explicit liquidity figure** — no
+  historical pool liquidity exists from the free data source (§19), so the
+  cap only runs when `--pool-liquidity-sol <amount>` is passed to
+  `npm run backtest`; otherwise it is explicitly marked "not evaluated" in
+  the report rather than silently skipped or (per `positionSize.ts`'s real,
+  correct-for-live-trading design) failing closed and zeroing every trade.
+- **1m-aggregated regime resampling** — the regime filter's higher-timeframe
+  SOL series is built from whatever interval `data:fetch` pulled, not a finer
+  base timeframe. Not the same concern as §6's synthesis-bounds problem (SOL
+  candles here are real, not synthesized), just unbuilt.
+- **Dashboard** (SPEC §14) — not started. Comes after phase 1 is reviewed.
 - **Execution layer** (phase 3) — not started, and must not be until phases 1 and
   2 are reviewed and explicitly approved.
 
-## Requirements carried into step 6
+## What step 6 delivered against the SPEC §10 requirements
 
-From SPEC §10 and decisions made since:
+All built and tested (`src/backtest/engine.ts`, `src/backtest/metrics.ts`);
+none yet exercised against a real trade, since the first real run produced
+zero (see above):
 
 - Fills at the **next candle's open**, never the signal candle's close.
-  Look-ahead bias is the most common way backtests lie.
-- **Stop fills use the intrabar rule** already implemented in `src/rules/exit.ts`.
-  The backtest must not reintroduce close-only stops.
-- **Maximum Favorable Excursion distribution per signal.** Required output: the
-  median MFE per token becomes the empirical expected move, replacing the ATR
-  bootstrap (DECISIONS §4). It also shows whether the 15% stop and the RSI-70
-  exit are sized sanely against how far moves actually run.
-- **Out-of-sample split**, reported separately from in-sample. If out-of-sample
-  collapses, say so plainly.
-- **Minimum 50 trades** before results are conclusive; warn prominently below it.
-- **Expectancy per trade** is the headline metric, not win rate.
-- **Exit trigger breakdown** — count and average P&L per exit reason, so the
-  RSI-70 exit's value can be judged.
-- **Rejection counts per filter**, so it is visible which filters do work.
-- Total fees and slippage as a percentage of gross P&L.
-- Document how the test universe was assembled (survivorship bias).
+- **Stop fills use the intrabar rule** already implemented in `src/rules/exit.ts`,
+  unchanged and re-used — no second implementation to drift from it.
+- **Maximum Favorable Excursion, per trade** — the real intrabar peak reached
+  while held, tracked via the same `evaluateExit`/`evaluateIntrabarStops`
+  peak-tracking the live rules already use. Once real trades exist, the
+  median MFE per token replaces the ATR bootstrap (DECISIONS §4).
+- **Out-of-sample split**, reported separately from in-sample, split
+  chronologically (never re-sorted).
+- **Minimum trade count** (`global.minTradesForConclusion`, default 50) —
+  flagged prominently below it.
+- **Expectancy per trade** is the headline metric in the report, not win rate.
+- **Exit trigger breakdown** — count and average net P&L per exit reason.
+- **Rejection counts per check**, including — specifically requested —
+  indicator-unreliable blocks split by `gap-in-series` vs `insufficient-warmup`.
+- Total costs as a percentage of total absolute gross P&L.
+- Document how the test universe was assembled (survivorship bias) — still
+  outstanding; only relevant once Tier B (memecoins) is in scope, which it
+  is not (DECISIONS §3).
 
 ## Working agreement
 
@@ -312,9 +395,9 @@ From SPEC §10 and decisions made since:
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 216 cases
-across 9 files: `data` 77, `rules` 45, `filters` 29, `indicators` 21, `config`
-14, `repo-hygiene` 10, `amount` 8, `logger` 8, `db` 4. `data` grew from 45 to 77
-with the GeckoTerminal/DexPaprika providers, pool selection and wick/ATR
-diagnostics (DECISIONS §18–§25); `repo-hygiene` grew from 9 to 10 with the
-`.claude/` ignore check.
+Counts are **test cases**, as reported by vitest — never assertions. 247
+cases across 10 files: `data` 77, `rules` 45, `backtest` 31, `filters` 29,
+`indicators` 21, `config` 14, `repo-hygiene` 10, `amount` 8, `logger` 8, `db`
+4. `data` grew from 45 to 77 with the GeckoTerminal/DexPaprika providers,
+pool selection and wick/ATR diagnostics (DECISIONS §18–§26); `backtest` is
+new (§27); `repo-hygiene` grew from 9 to 10 with the `.claude/` ignore check.

@@ -10,18 +10,17 @@ else:**
 3. **`docs/SPEC.md`** — the original requirements. Where the code diverges,
    DECISIONS is authoritative and records why.
 
-## STOP — do not start step 6
+## STOP — step 7, do not react to the backtest result without direction
 
-The next action is **not yours**. The operator must run the data layer against
-real candles on their own machine and report back what the fetch shows. Step 6
-(the backtest engine) is blocked until then. `docs/STATUS.md` has the commands
-and what to look for — it changed from "four numbers" to a GeckoTerminal-shaped
-review (pool coverage/gaps/rejects/wick-ATR diagnostics) after DECISIONS §18
-switched the default provider away from Binance; read STATUS.md, not this
-paragraph, for the current checklist.
+Step 6 (the backtest engine) is built and has run once against real data —
+result: zero trades, for a documented data-density reason (DECISIONS §27),
+not a strategy verdict. **The next action is not yours.** Do not tune
+parameters, change the interval, try a different pool, or otherwise react to
+this result. Do not start phase 2 (paper trading). `docs/STATUS.md` has the
+full numbers under "First real backtest run."
 
-Do not build speculatively while waiting. If asked to continue and the data
-review has not happened, say so rather than proceeding.
+If asked to continue and the operator hasn't reviewed the backtest result yet,
+say so rather than proceeding.
 
 ## Hard rules
 
@@ -69,6 +68,7 @@ npm run typecheck
 npm run config:check -- config/default.yaml
 npm run data:fetch -- --symbol JUP --interval 1h --days 90
 npm run data:fetch -- --symbol JUP --provider binance      # alternate, DECISIONS §18
+npm run backtest -- --symbol JUP                            # needs data:fetch's cache first
 ```
 
 `data:fetch` defaults to GeckoTerminal (`api.geckoterminal.com`, free, no key)
