@@ -8,6 +8,7 @@ import {
   UnimplementedTierBSafetyProvider, NotImplementedError,
 } from '../src/filters/tierBSafety.js';
 import { sol } from '../src/util/amount.js';
+import { computeLadderCostPreview, type LadderCostPreviewInput } from '../src/filters/ladderCostPreview.js';
 
 /** Build a close series that moves by exactly `ret` over `lookback` bars. */
 function movedBy(ret: number, lookback = 24, start = 100): number[] {
@@ -246,5 +247,126 @@ describe('Tier B safety provider', () => {
 
   it('explains why Tier B is deferred', () => {
     expect(() => p.evaluateAtEntry('x')).toThrow(/survivorship bias/);
+  });
+});
+
+describe('ladder cost preview (DECISIONS §40) — config-time economics per tranche', () => {
+  const baseCosts = {
+    dexFeePct: 0.25, priorityFeeSol: 0.0005, jitoTipSol: 0.0001,
+    fallbackSlippagePct: 1, poolLiquiditySol: null,
+  };
+
+  it('computes exact per-tranche numbers for a single 100% tranche', () => {
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 1,
+      ladder: { tranches: [{ targetGainPct: 15, sellPct: 100 }], minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20 },
+      ...baseCosts,
+    };
+    const r = computeLadderCostPreview(input);
+    const t = r.tranches[0]!;
+    expect(t.costBasisSol).toBeCloseTo(1, 10);
+    expect(t.grossProceedsSol).toBeCloseTo(1.15, 10);
+    expect(t.dexFeeSol).toBeCloseTo(0.002875, 10);
+    expect(t.slippageSol).toBeCloseTo(0.0115, 10);
+    expect(t.slippageEstimated).toBe(true);
+    expect(t.fixedFeeSol).toBeCloseTo(0.0006, 10);
+    expect(t.totalExitCostSol).toBeCloseTo(0.014975, 10);
+    expect(t.netProceedsSol).toBeCloseTo(1.135025, 10);
+    expect(t.netGainPct).toBeCloseTo(13.5025, 6);
+    expect(t.fixedCostPctOfGrossProceeds).toBeCloseTo(0.052173913, 6);
+    expect(t.netFloorPass).toBe(true);
+    expect(t.fixedCostRatioPass).toBe(true);
+    expect(t.pass).toBe(true);
+    expect(r.allPass).toBe(true);
+  });
+
+  it('fails the fixed-cost-ratio check on a tranche too small for its fixed fee', () => {
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 1,
+      ladder: { tranches: [{ targetGainPct: 15, sellPct: 0.1 }], minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20 },
+      ...baseCosts,
+    };
+    const r = computeLadderCostPreview(input);
+    const t = r.tranches[0]!;
+    expect(t.fixedCostPctOfGrossProceeds).toBeGreaterThan(20);
+    expect(t.fixedCostRatioPass).toBe(false);
+    expect(t.pass).toBe(false);
+    expect(r.allPass).toBe(false);
+  });
+
+  it('fails the net-floor check on a large tranche with a thin target, even though fixed-cost ratio passes', () => {
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 10,
+      ladder: { tranches: [{ targetGainPct: 3, sellPct: 100 }], minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20 },
+      ...baseCosts,
+    };
+    const r = computeLadderCostPreview(input);
+    const t = r.tranches[0]!;
+    expect(t.netGainPct).toBeLessThan(5);
+    expect(t.netFloorPass).toBe(false);
+    expect(t.fixedCostRatioPass).toBe(true);   // large tranche, fixed fee is negligible
+    expect(t.pass).toBe(false);
+  });
+
+  it('reports numbers for a passing AND a failing tranche in the same ladder — both visible', () => {
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 1,
+      ladder: {
+        tranches: [{ targetGainPct: 15, sellPct: 0.1 }, { targetGainPct: 30, sellPct: 50 }],
+        minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20,
+      },
+      ...baseCosts,
+    };
+    const r = computeLadderCostPreview(input);
+    expect(r.tranches).toHaveLength(2);
+    expect(r.tranches[0]!.pass).toBe(false);
+    expect(r.tranches[1]!.pass).toBe(true);
+    expect(r.allPass).toBe(false);
+    expect(Number.isFinite(r.tranches[0]!.netGainPct)).toBe(true);
+    expect(Number.isFinite(r.tranches[1]!.netGainPct)).toBe(true);
+  });
+
+  it('computes the whole-ladder vs single-exit comparison exactly — the price of laddering', () => {
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 1,
+      ladder: {
+        tranches: [{ targetGainPct: 15, sellPct: 50 }, { targetGainPct: 30, sellPct: 50 }],
+        minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20,
+      },
+      ...baseCosts,
+    };
+    const r = computeLadderCostPreview(input);
+    expect(r.ladderTotalExitCostSol).toBeCloseTo(0.0165125, 8);
+    expect(r.ladderTotalExitCostPctOfPosition).toBeCloseTo(1.65125, 6);
+    expect(r.singleExit.averageGainPct).toBeCloseTo(22.5, 10);
+    expect(r.singleExit.totalExitCostSol).toBeCloseTo(0.0159125, 8);
+    expect(r.singleExit.totalExitCostPctOfPosition).toBeCloseTo(1.59125, 6);
+    // driven almost entirely by the SECOND transaction's fixed fee — under the
+    // linear slippage model, dex-fee + slippage sum identically either way
+    expect(r.ladderPremiumPct).toBeCloseTo(0.06, 6);
+  });
+
+  it('uses real pool liquidity for slippage when supplied, instead of the fallback', () => {
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 1,
+      ladder: { tranches: [{ targetGainPct: 15, sellPct: 100 }], minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20 },
+      dexFeePct: 0.25, priorityFeeSol: 0.0005, jitoTipSol: 0.0001, fallbackSlippagePct: 1,
+      poolLiquiditySol: 1000,
+    };
+    const r = computeLadderCostPreview(input);
+    const t = r.tranches[0]!;
+    expect(t.slippageEstimated).toBe(false);
+    expect(t.slippagePct).toBeCloseTo((1.15 / 1000) * 100, 8);
+  });
+
+  it('compares a partial ladder (a held runner) against a full single exit, not a partial one', () => {
+    const input: LadderCostPreviewInput = {
+      originalPositionSol: 1,
+      ladder: { tranches: [{ targetGainPct: 20, sellPct: 40 }], minNetFloorPct: 5, maxFixedCostPctOfProceeds: 20 },
+      ...baseCosts,
+    };
+    const r = computeLadderCostPreview(input);
+    expect(r.singleExit.averageGainPct).toBeCloseTo(20, 10);       // blended over the SOLD portion only
+    expect(r.singleExit.grossProceedsSol).toBeCloseTo(1.2, 10);    // but applied to the FULL position
   });
 });
