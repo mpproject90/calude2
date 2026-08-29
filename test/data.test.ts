@@ -674,10 +674,30 @@ describe('pool selection', () => {
     expect(r.selected).toBe('late');
   });
 
-  it('flags migration when the locally-dominant pool changes mid-window, without resolving it', () => {
+  it('does NOT flag migration from hour-to-hour volume noise within the same day', () => {
+    // Bug found running this live (DECISIONS §25): comparing raw per-BAR
+    // volume between two consistently active pools (a real 51%/34% split)
+    // flipped the "leader" almost every hour — 881 reported "migrations"
+    // over a 90-day window, none of them real. Per-bar leadership here
+    // alternates A,B,A,B, but A clearly wins the DAY total (1020 vs 820), so
+    // this must resolve to a single period, not four.
     const series: PoolSeries[] = [
-      { address: 'A', candles: [vol(0, 500), vol(1, 500), vol(2, 10), vol(3, 10)] },
-      { address: 'B', candles: [vol(0, 10), vol(1, 10), vol(2, 500), vol(3, 500)] },
+      { address: 'A', candles: [vol(0, 500), vol(1, 10), vol(2, 500), vol(3, 10)] },
+      { address: 'B', candles: [vol(0, 10), vol(1, 500), vol(2, 10), vol(3, 300)] },
+    ];
+    const r = selectDominantPool(series, '1h');
+    expect(r.migrated).toBe(false);
+    expect(r.dominancePeriods).toHaveLength(1);
+    expect(r.dominancePeriods[0]!.pool).toBe('A');
+  });
+
+  it('flags migration when the day-bucketed dominant pool changes, without resolving it', () => {
+    // i=24 is exactly one day after i=0 regardless of T0's phase within a
+    // day (24 * H === one day), so these two groups land in different
+    // day-buckets.
+    const series: PoolSeries[] = [
+      { address: 'A', candles: [vol(0, 500), vol(1, 500), vol(24, 10), vol(25, 10)] },
+      { address: 'B', candles: [vol(0, 10), vol(1, 10), vol(24, 500), vol(25, 500)] },
     ];
     const r = selectDominantPool(series, '1h');
     expect(r.migrated).toBe(true);

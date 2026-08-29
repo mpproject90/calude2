@@ -34,6 +34,17 @@
  */
 import type { Candle, Interval } from '../types/index.js';
 
+/**
+ * Granularity for the "locally dominant pool" walk, independent of the
+ * candle interval. FOUND BY RUNNING THIS AGAINST REAL DATA (DECISIONS §25):
+ * comparing raw per-BAR volume between two consistently active pools (a
+ * 51%/34% split, in the case that surfaced this) flips the "leader" almost
+ * every bar — 881 reported "dominance periods" over a 90-day 1h window, none
+ * of them a real migration. Bucketing to a day smooths that noise while still
+ * catching a genuine multi-day shift in where trading happens.
+ */
+const DOMINANCE_BUCKET_MS = 24 * 60 * 60 * 1000;
+
 export interface PoolSeries {
   readonly address: string;
   readonly candles: readonly Candle[];
@@ -57,20 +68,20 @@ export interface PoolDominanceResult {
   /** Each pool's share of total traded volume across the window, 0..1. */
   readonly volumeShareByPool: Readonly<Record<string, number>>;
   readonly coverageByPool: Readonly<Record<string, PoolCoverage>>;
-  /** True when the locally-dominant pool changed at least once across the window. */
+  /** True when the day-bucketed dominant pool changed at least once across the window. */
   readonly migrated: boolean;
-  /** Contiguous stretches of bars during which each pool led on volume. */
+  /** Contiguous stretches of days during which each pool led on volume. */
   readonly dominancePeriods: readonly DominancePeriod[];
 }
 
 /**
  * Selects the pool with the highest total traded volume across the window as
  * the series to use, and separately reports whether the LOCALLY dominant pool
- * (bar by bar) ever changed — i.e. whether liquidity/activity visibly
- * migrated — without acting on that fact.
+ * (by day-bucketed volume — see `DOMINANCE_BUCKET_MS`) ever changed — i.e.
+ * whether trading activity visibly migrated — without acting on that fact.
  *
- * Ties (including "nobody traded this bar") are broken by input order, so the
- * result is deterministic given the same input.
+ * Ties (including "nobody traded this bucket") are broken by input order, so
+ * the result is deterministic given the same input.
  */
 export function selectDominantPool(
   series: readonly PoolSeries[],
@@ -99,47 +110,61 @@ export function selectDominantPool(
     volumeShareByPool[s.address] = grandTotal > 0 ? (totalVolumeByPool[s.address] ?? 0) / grandTotal : 0;
   }
 
-  // Merge every pool's bars onto the union of timestamps, so the "locally
-  // dominant pool per bar" walk sees every pool's volume at every timestamp
-  // that ANY pool has a bar for (missing = 0, never fabricated).
-  const timestamps = new Set<number>();
-  const volumeAt = new Map<string, Map<number, number>>();
-  for (const s of series) {
-    const m = new Map<number, number>();
-    for (const c of s.candles) {
-      m.set(c.timestamp, Math.max(0, c.volume));
-      timestamps.add(c.timestamp);
-    }
-    volumeAt.set(s.address, m);
+  // Bucket every pool's bars into day-sized buckets (independent of the
+  // candle interval) and compare TOTAL volume per bucket, not per bar — see
+  // the DOMINANCE_BUCKET_MS comment above for why per-bar comparison is
+  // wrong. Each bucket also tracks the real min/max bar timestamp it
+  // contains, so a reported period's boundaries are actual observed bars,
+  // never a fabricated bucket edge.
+  interface Bucket {
+    volumeByPool: Map<string, number>;
+    minTimestamp: number;
+    maxTimestamp: number;
   }
-  const orderedTimestamps = [...timestamps].sort((a, b) => a - b);
+  const buckets = new Map<number, Bucket>();
+  for (const s of series) {
+    for (const c of s.candles) {
+      const key = Math.floor(c.timestamp / DOMINANCE_BUCKET_MS);
+      let bucket = buckets.get(key);
+      if (bucket === undefined) {
+        bucket = { volumeByPool: new Map(), minTimestamp: c.timestamp, maxTimestamp: c.timestamp };
+        buckets.set(key, bucket);
+      } else {
+        if (c.timestamp < bucket.minTimestamp) bucket.minTimestamp = c.timestamp;
+        if (c.timestamp > bucket.maxTimestamp) bucket.maxTimestamp = c.timestamp;
+      }
+      bucket.volumeByPool.set(s.address, (bucket.volumeByPool.get(s.address) ?? 0) + Math.max(0, c.volume));
+    }
+  }
+  const orderedBucketKeys = [...buckets.keys()].sort((a, b) => a - b);
 
   const dominancePeriods: DominancePeriod[] = [];
   let currentPool: string | null = null;
   let periodStart: number | null = null;
-  let lastTimestamp: number | null = null;
+  let periodEnd: number | null = null;
 
-  for (const ts of orderedTimestamps) {
+  for (const key of orderedBucketKeys) {
+    const bucket = buckets.get(key)!;
     let leader: string | null = null;
     let leaderVolume = -1;
     for (const s of series) {
-      const v = volumeAt.get(s.address)?.get(ts) ?? 0;
+      const v = bucket.volumeByPool.get(s.address) ?? 0;
       if (v > leaderVolume) {
         leaderVolume = v;
         leader = s.address;
       }
     }
     if (leader !== currentPool) {
-      if (currentPool !== null && periodStart !== null && lastTimestamp !== null) {
-        dominancePeriods.push({ pool: currentPool, fromTimestamp: periodStart, toTimestamp: lastTimestamp });
+      if (currentPool !== null && periodStart !== null && periodEnd !== null) {
+        dominancePeriods.push({ pool: currentPool, fromTimestamp: periodStart, toTimestamp: periodEnd });
       }
       currentPool = leader;
-      periodStart = ts;
+      periodStart = bucket.minTimestamp;
     }
-    lastTimestamp = ts;
+    periodEnd = bucket.maxTimestamp;
   }
-  if (currentPool !== null && periodStart !== null && lastTimestamp !== null) {
-    dominancePeriods.push({ pool: currentPool, fromTimestamp: periodStart, toTimestamp: lastTimestamp });
+  if (currentPool !== null && periodStart !== null && periodEnd !== null) {
+    dominancePeriods.push({ pool: currentPool, fromTimestamp: periodStart, toTimestamp: periodEnd });
   }
 
   const selected = series

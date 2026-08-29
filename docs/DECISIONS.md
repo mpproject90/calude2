@@ -586,3 +586,84 @@ never blocks anything. A high outlier count means MFI's typical price and
 ATR's true range on this token are eating single-swap noise, and is grounds to
 scrutinize the token/pool before trusting either, same conclusion as a bad
 range-widening number, different underlying cause.
+
+## 24. First real GeckoTerminal fetch: tighter rate limit than documented, and two resilience gaps
+
+**The operator's first live run of `data:fetch --provider geckoterminal`**
+(§18) surfaced real behavior no mock could: `api.geckoterminal.com`'s free
+tier rate-limited (429) after roughly 5 requests within under a minute — far
+tighter in practice than the documented "30 requests/min, no key" suggested,
+and every 429 response sent no `Retry-After` header, so the throttle's
+exponential-backoff fallback was doing all the work (§18's throttle assumed a
+steady 30/min was achievable; it isn't, at least not in bursts).
+
+**Two real gaps this exposed, both fixed:**
+
+- **One candidate pool's persistent 429 killed the entire pull.** JUP had 5
+  candidate pools; the second one's OHLCV fetch exhausted `maxAttempts` (4)
+  and threw, discarding the pool-search results and the first candidate's
+  already-successfully-fetched OHLCV along with it. **Fix:** `pullDominant`
+  (`fetch-data.ts`) now catches a single candidate's failure, logs it, and
+  excludes that candidate from `selectDominantPool` rather than aborting —
+  only fails closed if EVERY candidate for a token fails. This is not "retry
+  harder" — it accepts that a candidate may be genuinely unreachable this run
+  and still produces a usable answer from the candidates that did respond.
+- **A failed run threw away every raw sample already captured.**
+  `writeRawSample` was only called after the whole function succeeded, so the
+  first failure (before any resilience fix existed) discarded a real,
+  successfully-parsed pool-search response and a real, successfully-parsed
+  OHLCV response — exactly the diagnostic evidence this project's raw-sample
+  mechanism exists to preserve (§14, §18). **Fix:** `runGeckoTerminal` now
+  writes whatever raw samples and pool-selection metadata were captured in a
+  `finally` block, so a run that fails partway through still leaves the
+  evidence it already paid real request budget for.
+
+Also added: `GeckoTerminalCandleProvider` takes an `onRateLimit` callback
+fired on every 429 with the attempt number and the raw `Retry-After` header
+value (or its absence), and `fetch-data.ts` prints each one. This is what
+revealed the missing `Retry-After` header above — visibility added
+specifically so the next tuning decision is made from evidence, not another
+guess. **Not yet changed:** the throttle's request budget and backoff
+constants. The real ceiling still isn't known precisely (only that 30/min
+isn't reliably achievable in a burst); tightening the throttle further without
+more evidence would be the same mistake as originally trusting the documented
+number.
+
+## 25. Pool-dominance migration must be judged per day, not per bar
+
+**Bug found running the fix from §24 against real data**, not by any test.
+The first successful live run reported JUP/SOL "DOMINANCE MIGRATED" — 881
+separate periods over a 90-day, 2161-bar window, alternating almost every
+hour between the two largest pools (a real 51%/34% volume split). That is not
+migration; it is two consistently active pools whose per-bar volume leader
+varies by chance. `selectDominantPool` (§19) compared raw per-BAR volume to
+decide the "locally dominant" pool at each timestamp, so any two pools
+trading at a similar clip look like constant migration — the diagnostic was
+worse than useless, since 881 fake migrations bury the one real signal this
+report exists to surface, and an operator skimming the count would reasonably
+conclude the data is untrustworthy when it isn't.
+
+**Decision:** bucket bars into calendar-day-sized buckets
+(`DOMINANCE_BUCKET_MS = 24h`, independent of the candle interval — 1h, 4h and
+1d series all get the same day-level migration granularity), sum volume per
+pool per bucket, and compare bucket TOTALS to find the locally-dominant pool.
+A period's reported boundaries are still real observed bar timestamps (the
+bucket's min/max), never a fabricated bucket edge. This smooths hour-to-hour
+noise while still catching a genuine multi-day shift — the case this
+diagnostic actually exists to report (DECISIONS §19's original example:
+liquidity migrating from an early pool to a later one).
+
+**Verified against the exact failure pattern**, not just the fix in the
+abstract: `test/data.test.ts` has a case with per-bar leadership alternating
+A,B,A,B (the observed pathology) where the day TOTAL clearly favors one pool
+— asserts `migrated: false`, one period — alongside a case spanning two real
+days where the day-bucketed leader genuinely changes — asserts `migrated:
+true`, two periods.
+
+**Not addressed:** whether day is the RIGHT bucket size in general, versus
+just the one that fixed this specific 90-day/1h case. A very short backtest
+window (a few days) would see migration detection degrade toward "always one
+bucket, never flagged" — a safe default (under-reporting on a report, not a
+trading decision) but not necessarily the most useful one for a short window.
+Revisit if a short-window fetch needs finer migration resolution than this
+gives it.

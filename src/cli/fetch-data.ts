@@ -40,7 +40,8 @@ import { validateCandles } from '../data/validate.js';
 import { detectSeriesIssues } from '../data/gaps.js';
 import { BinanceCandleProvider, type RawSample as BinanceRawSample } from '../data/providers/binance.js';
 import {
-  GeckoTerminalCandleProvider, SOL_MINT, USDC_MINT, type PoolCandidate, type RawSample as GtRawSample,
+  GeckoTerminalCandleProvider, SOL_MINT, USDC_MINT,
+  type PoolCandidate, type RateLimitEvent, type RawSample as GtRawSample,
 } from '../data/providers/geckoterminal.js';
 import { synthesizeRatioSeries, rangeWideningRatio } from '../data/synthesize.js';
 import { selectDominantPool, type PoolDominanceResult, type PoolSeries } from '../data/poolSelection.js';
@@ -153,9 +154,22 @@ async function pullDominant(
     throw new Error(`no ${label} pool found on GeckoTerminal — cannot proceed without a trading pair`);
   }
 
+  // A single candidate's OHLCV fetch failing (e.g. an unresolved rate limit,
+  // DECISIONS §24) should not sink the whole pull when other candidates
+  // already succeeded — only fail closed if EVERY candidate fails.
   const series: PoolSeries[] = [];
+  const failed: { address: string; error: unknown }[] = [];
   for (const c of candidates) {
-    series.push({ address: c.address, candles: await gecko.getPoolOhlcv(c.address, interval, from, to) });
+    try {
+      series.push({ address: c.address, candles: await gecko.getPoolOhlcv(c.address, interval, from, to) });
+    } catch (err) {
+      failed.push({ address: c.address, error: err });
+      console.log(`  WARNING: ${c.address} (dex=${c.dex}) failed and is excluded from selection:`);
+      console.log(`    ${formatErrorChain(err).split('\n').join('\n    ')}`);
+    }
+  }
+  if (series.length === 0) {
+    throw new Error(`all ${candidates.length} ${label} pool candidate(s) failed — cannot select a series`);
   }
   const dominance = selectDominantPool(series, interval);
 
@@ -206,44 +220,60 @@ async function runGeckoTerminal(): Promise<void> {
   const tokenAddress = resolveTokenAddress(symbol);
   const rawSamples: GtRawSample[] = [];
   const onRawSample = (s: GtRawSample): void => { rawSamples.push(s); };
+  const onRateLimit = (e: RateLimitEvent): void => {
+    console.log(
+      `  rate limited (429), attempt ${e.attempt}/${e.maxAttempts}, ` +
+      `Retry-After=${e.retryAfterHeader ?? '(not sent)'}, waiting ${e.waitMs}ms — ${e.url}`,
+    );
+  };
 
-  const gecko = new GeckoTerminalCandleProvider({ onRawSample });
-  const geckoRef = new GeckoTerminalCandleProvider({ onRawSample });
+  const gecko = new GeckoTerminalCandleProvider({ onRawSample, onRateLimit });
+  const geckoRef = new GeckoTerminalCandleProvider({ onRawSample, onRateLimit });
 
-  const tokenPull = await pullDominant(`${symbol}/SOL`, tokenAddress, SOL_MINT, gecko);
-  const solPull = await pullDominant('SOL/USDC', SOL_MINT, USDC_MINT, geckoRef);
+  // Tracked outside the try so the finally block can still write whatever raw
+  // evidence and pool-selection metadata were captured even if the run fails
+  // partway through (DECISIONS §24) — a failed run already spent real request
+  // budget and should not also throw away the data it received for that cost.
+  let tokenPool: string | null = null;
+  let solPool: string | null = null;
+  let tokenCandles: Candle[] = [];
 
-  const repo = new CandleRepository(db);
-  const tokenCandles = cacheAndReport(repo, symbol, tokenPull.candles, 'geckoterminal');
-  cacheAndReport(repo, 'SOL', solPull.candles, 'geckoterminal');
+  try {
+    const tokenPull = await pullDominant(`${symbol}/SOL`, tokenAddress, SOL_MINT, gecko);
+    tokenPool = tokenPull.pool;
+    const solPull = await pullDominant('SOL/USDC', SOL_MINT, USDC_MINT, geckoRef);
+    solPool = solPull.pool;
 
-  console.log(`\n${symbol}/SOL selected pool: ${tokenPull.pool ?? 'NONE — no pool traded in this window'}`);
-  console.log(`SOL/USDC selected pool: ${solPull.pool ?? 'NONE — no pool traded in this window'}`);
+    const repo = new CandleRepository(db);
+    tokenCandles = cacheAndReport(repo, symbol, tokenPull.candles, 'geckoterminal');
+    cacheAndReport(repo, 'SOL', solPull.candles, 'geckoterminal');
 
-  const wick = computeWickDiagnostics(tokenCandles);
-  console.log(`\n${symbol}/SOL wick/ATR diagnostics — the range-widening replacement (DECISIONS §23):`);
-  console.log(`  bars                        ${wick.bars}`);
-  console.log(`  wick:body p50/p90/p99/max   ${fmt(wick.wickToBody.p50)} / ${fmt(wick.wickToBody.p90)} / ${fmt(wick.wickToBody.p99)} / ${fmt(wick.wickToBody.max)}`);
-  console.log(`  all-wick (zero-body) bars   ${wick.wickToBody.infiniteCount}`);
-  console.log(
-    `  ATR-outlier bars (>${wick.atrOutlierMultiple}x ATR(14) outside the body)   ${wick.atrOutlierCount} of ` +
-    `${wick.bars - wick.atrUnreliableCount} judged (${wick.atrUnreliableCount} still in ATR warm-up)`,
-  );
-  console.log(
-    '\n  This is real pool OHLC, not synthesized — DECISIONS §6\'s high/low-BOUNDS problem does\n' +
-    '  not apply here. A high outlier count instead means individual swaps (thin liquidity,\n' +
-    '  one oversized trade) are producing phantom wicks that MFI\'s typical price and ATR\'s\n' +
-    '  true range would treat as real. Review before trusting either on this token.',
-  );
+    console.log(`\n${symbol}/SOL selected pool: ${tokenPool ?? 'NONE — no pool traded in this window'}`);
+    console.log(`SOL/USDC selected pool: ${solPool ?? 'NONE — no pool traded in this window'}`);
 
-  writeRawSample(rawSamples, {
-    symbol, interval, from, to, provider: 'geckoterminal',
-    tokenPool: tokenPull.pool, solPool: solPull.pool,
-    parsedRow0: tokenCandles[0] ?? null,
-    parsedRow0Iso: tokenCandles[0] === undefined ? null : new Date(tokenCandles[0].timestamp).toISOString(),
-  });
-
-  db.close();
+    const wick = computeWickDiagnostics(tokenCandles);
+    console.log(`\n${symbol}/SOL wick/ATR diagnostics — the range-widening replacement (DECISIONS §23):`);
+    console.log(`  bars                        ${wick.bars}`);
+    console.log(`  wick:body p50/p90/p99/max   ${fmt(wick.wickToBody.p50)} / ${fmt(wick.wickToBody.p90)} / ${fmt(wick.wickToBody.p99)} / ${fmt(wick.wickToBody.max)}`);
+    console.log(`  all-wick (zero-body) bars   ${wick.wickToBody.infiniteCount}`);
+    console.log(
+      `  ATR-outlier bars (>${wick.atrOutlierMultiple}x ATR(14) outside the body)   ${wick.atrOutlierCount} of ` +
+      `${wick.bars - wick.atrUnreliableCount} judged (${wick.atrUnreliableCount} still in ATR warm-up)`,
+    );
+    console.log(
+      '\n  This is real pool OHLC, not synthesized — DECISIONS §6\'s high/low-BOUNDS problem does\n' +
+      '  not apply here. A high outlier count instead means individual swaps (thin liquidity,\n' +
+      '  one oversized trade) are producing phantom wicks that MFI\'s typical price and ATR\'s\n' +
+      '  true range would treat as real. Review before trusting either on this token.',
+    );
+  } finally {
+    writeRawSample(rawSamples, {
+      symbol, interval, from, to, provider: 'geckoterminal', tokenPool, solPool,
+      parsedRow0: tokenCandles[0] ?? null,
+      parsedRow0Iso: tokenCandles[0] === undefined ? null : new Date(tokenCandles[0].timestamp).toISOString(),
+    });
+    db.close();
+  }
 }
 
 // ---------------------------------------------------------------------------

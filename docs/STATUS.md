@@ -8,9 +8,10 @@ next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 **Last updated:** end of phase 1 step 2, plus the documentation and durability
 pass, plus the GeckoTerminal provider switch (DECISIONS §18–§23: Binance is
 regionally blocked for this project's operator, GeckoTerminal is now the
-default data provider, and this file's data-review checklist below changed
-accordingly). Verified against `main` by clean clone and tree-versus-index
-diff.
+default data provider), plus the first real GeckoTerminal fetch and the two
+bugs it surfaced and fixed (DECISIONS §24–§25) — see "First real GeckoTerminal
+review" below for the numbers, still pending the operator's judgment. Verified
+against `main` by clean clone and tree-versus-index diff.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -143,24 +144,76 @@ submits a transaction.
 
 ## What is UNVERIFIED
 
-**Neither the GeckoTerminal provider (default) nor the Binance provider
-(alternate) has ever made a real request.** Both hosts are egress-blocked in
-the build container this was written in, so every provider test runs against
-an injected mock. For GeckoTerminal: pagination, pool search/selection, the
-rate throttle and JSON:API parsing are verified against a *documented model* of
-the response shape, not the API itself (DECISIONS §18). For Binance:
-pagination, the weight budget, 429/418 backoff and row parsing, same status as
-before. **The operator's local fetch is what verifies both**, whichever
-`--provider` is used.
+**GeckoTerminal (default) has now made real requests and been reviewed once**
+— see "First real GeckoTerminal review" below for the numbers and DECISIONS
+§24–§25 for what that run found and fixed. It is no longer purely
+mock-verified, but it has been reviewed exactly once, against one token
+(JUP), one interval (1h), one 90-day window — treat that as a first data
+point, not a settled verification. **Binance (alternate) has still never made
+a real request** from inside this build; every Binance test runs against an
+injected mock, same status as before (DECISIONS §14).
 
 The failure path is known-good for both, and now carries more than a bare
 message: a blocked host, a bad HTTP status, or a raw network/TLS failure all
 throw with the request URL and the full error `cause` chain attached
 (DECISIONS §22) — `fetch-data.ts`'s top-level handler prints all of it via
-`formatErrorChain`, not just `err.message`.
+`formatErrorChain`, not just `err.message`. This is what made the §24/§25
+findings diagnosable in the first place rather than just "it failed."
 
 **No backtest has ever run, so no strategy result of any kind exists. No claim
 about profitability has been made and none should be inferred.**
+
+## First real GeckoTerminal review — JUP, 1h, 90 days (2026-08-29)
+
+Run twice: the first run hit an unresolved 429 on the second pool candidate
+and crashed with nothing persisted (DECISIONS §24); after the resilience and
+day-bucket-migration fixes (§24–§25) it completed cleanly. Numbers below are
+from the second (fixed) run. **This has not been judged against the decision
+checklist above by the operator — these are the numbers to review, not a
+conclusion.**
+
+| Signal | JUP/SOL | SOL/USDC (reference) |
+|---|---|---|
+| Pool candidates found | 5 | 5 |
+| Selected pool | `C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg` (meteora) | `Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE` (orca) |
+| Volume share of selected pool | 78.0% (one candidate excluded — persistent 429, see below) | 64.6% |
+| Bar coverage | 1972 of 2161 (91.25%) | 2161 of 2161 (100.00%) |
+| Gaps | 150 (189 bars missing) | 0 |
+| Rejected candles | 0 | 0 |
+| Dominance migration | YES — 3 periods: the selected pool led 2026-05-31 to 2026-06-19, a different pool (`HdsFGjjY46twFKjqHqUyT2bnRS4XCo1HaExts5CSNprU`, also meteora) led for one day (2026-06-20), then the selected pool resumed 2026-06-21 to 2026-08-29 | not reported (single dominant pool throughout) |
+| Wick:body ratio p50/p90/p99/max | 1.00 / 127.17 / 1,056,450.59 / ∞ | not computed (reference series only) |
+| All-wick (zero-body) bars | 2 of 1972 | — |
+| ATR-outlier bars (>3× ATR(14)) | 1 of 1875 judged (97 still in ATR warm-up) | — |
+
+**What stands out, flagged for operator review, not resolved here:**
+
+- **JUP/SOL's 91.25% coverage (189 missing bars) is not explained by pool
+  age** — the selected pool was created 2024-03-19, well before this 90-day
+  window, so this isn't the "young pool" case the data-review checklist above
+  expects to explain low coverage. Either the pool went quiet for real
+  stretches, or there's an interval-alignment issue worth checking against
+  `data/raw-sample.json`.
+- **The one-day dominance shift to `HdsFGjjY...` on 2026-06-20** is a real,
+  reported migration, not noise (DECISIONS §25 fixed the false-positive
+  version of this). Worth a look at what happened to the selected pool's
+  liquidity/volume that day.
+- **The wick:body p99 of ~1.06 million** is a large jump from p90's 127 —
+  consistent with one or two bars having a body so close to zero that even a
+  modest real wick produces an enormous (but finite, not `Infinity`) ratio.
+  Only 2 bars are flagged fully all-wick; this suggests a handful more sit
+  just short of that. Worth inspecting which bars these are before trusting
+  MFI/ATR on them.
+- **One of JUP/SOL's 5 candidate pools (`C1MgLojNLWBKADvu9BHdtgzz1oZX4dZ5zGdGcgvvW8Wz`,
+  orca) failed with a persistent 429 and was excluded from selection**
+  (DECISIONS §24) — it holds real volume share (~34% in the first, partial
+  run) so its exclusion is not neutral. A re-run may or may not include it;
+  this is a live consequence of the free tier's tight rate limit, not a bug.
+- **DexPaprika's rate limit remains unresolved** (DECISIONS §21) and this
+  review did not touch it — it is not wired into `fetch-data.ts`.
+
+`data/raw-sample.json` was written on the fixed run and is available locally
+(gitignored, not in this repo) for inspecting the exact bars behind any of
+the above.
 
 ## What is deliberately NOT built
 
@@ -240,9 +293,9 @@ From SPEC §10 and decisions made since:
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 215 cases
-across 9 files: `data` 76, `rules` 45, `filters` 29, `indicators` 21, `config`
-14, `repo-hygiene` 10, `amount` 8, `logger` 8, `db` 4. `data` grew from 45 to 76
+Counts are **test cases**, as reported by vitest — never assertions. 216 cases
+across 9 files: `data` 77, `rules` 45, `filters` 29, `indicators` 21, `config`
+14, `repo-hygiene` 10, `amount` 8, `logger` 8, `db` 4. `data` grew from 45 to 77
 with the GeckoTerminal/DexPaprika providers, pool selection and wick/ATR
-diagnostics (DECISIONS §18–§23); `repo-hygiene` grew from 9 to 10 with the
+diagnostics (DECISIONS §18–§25); `repo-hygiene` grew from 9 to 10 with the
 `.claude/` ignore check.

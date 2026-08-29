@@ -96,6 +96,15 @@ export interface RawSample {
   readonly body: unknown;
 }
 
+export interface RateLimitEvent {
+  readonly url: string;
+  readonly attempt: number;
+  readonly maxAttempts: number;
+  /** Raw `Retry-After` header value, or null if the response didn't send one. */
+  readonly retryAfterHeader: string | null;
+  readonly waitMs: number;
+}
+
 export interface GeckoTerminalOptions {
   readonly baseUrl?: string;
   readonly fetchFn?: FetchFn;
@@ -106,6 +115,13 @@ export interface GeckoTerminalOptions {
   /** Token symbol -> resolved pool address. Populate via `setPool` after pool selection. */
   readonly poolMap?: Readonly<Record<string, string>>;
   readonly onRawSample?: (sample: RawSample) => void;
+  /**
+   * Fired on every 429, before backing off — real visibility into whether the
+   * server sends `Retry-After` at all, since the documented "30 req/min" free
+   * limit proved tighter in practice than the throttle assumed (DECISIONS
+   * §24). Used to gather evidence rather than re-guess the right numbers.
+   */
+  readonly onRateLimit?: (event: RateLimitEvent) => void;
 }
 
 const defaultSleep = (ms: number): Promise<void> =>
@@ -186,6 +202,7 @@ export class GeckoTerminalCandleProvider implements CandleProvider {
   private readonly now: () => number;
   private readonly maxAttempts: number;
   private readonly onRawSample: ((sample: RawSample) => void) | undefined;
+  private readonly onRateLimit: ((event: RateLimitEvent) => void) | undefined;
   private rawOhlcvSampleTaken = false;
   private rawPoolSampleTaken = false;
   private readonly poolMap: Record<string, string>;
@@ -200,6 +217,7 @@ export class GeckoTerminalCandleProvider implements CandleProvider {
     this.now = opts.now ?? (() => Date.now());
     this.maxAttempts = opts.maxAttempts ?? 4;
     this.onRawSample = opts.onRawSample;
+    this.onRateLimit = opts.onRateLimit;
     this.poolMap = { ...(opts.poolMap ?? {}) };
   }
 
@@ -251,10 +269,12 @@ export class GeckoTerminalCandleProvider implements CandleProvider {
       }
 
       if (res.status === 429) {
-        const retryAfter = Number(res.headers.get('Retry-After') ?? '0');
+        const retryAfterHeader = res.headers.get('Retry-After');
+        const retryAfter = Number(retryAfterHeader ?? '0');
         const waitMs = Number.isFinite(retryAfter) && retryAfter > 0
           ? retryAfter * 1000
           : Math.min(60_000, 2 ** attempt * 1000);
+        this.onRateLimit?.({ url, attempt, maxAttempts: this.maxAttempts, retryAfterHeader, waitMs });
         if (attempt === this.maxAttempts) {
           throw new GeckoTerminalRateLimitError(res.status, waitMs,
             `GeckoTerminal rate limited (429) after ${attempt} attempts for ${url}`);
