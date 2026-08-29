@@ -100,6 +100,16 @@ export interface BacktestResult {
   readonly entryEvaluations: number;
   /** Of those, how many were blocked specifically because RSI/MFI were not `reliable`. */
   readonly indicatorUnreliableBlocks: number;
+  /**
+   * Of `indicatorUnreliableBlocks`, split by WHY — this can differ hugely from
+   * the naive "period * warmupMultiplier" expectation. Priority when a bar's
+   * RSI and MFI disagree on reason: `gap-in-series` is reported over
+   * `insufficient-warmup`, since it is the more specific, actionable finding
+   * (a gap invalidates a full trailing warm-up window behind it, not one bar
+   * — indicators/core.ts). A dense gap series can make this dwarf plain
+   * warm-up as the dominant cause; see DECISIONS §27.
+   */
+  readonly indicatorUnreliableByReason: Readonly<Record<string, number>>;
   readonly startingBalanceSol: TokenAmount;
   readonly endingBalanceSol: TokenAmount;
   readonly poolLiquiditySolUsed: number | null;
@@ -175,6 +185,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
   const rejectedSignals: RejectedSignal[] = [];
   let entryEvaluations = 0;
   let indicatorUnreliableBlocks = 0;
+  const indicatorUnreliableByReason: Record<string, number> = {};
 
   const recentClosedForPortfolio = (): ClosedTrade[] =>
     trades.map((t) => ({ token: token.symbol, closedAt: t.exitTimestamp, closedIndex: t.exitIndex, realizedPnlSol: t.netPnlSol }));
@@ -285,7 +296,15 @@ export function runBacktest(input: BacktestInput): BacktestResult {
         pendingEntry = { checks: entryDecision.checks, sizeSol: positionSizeFilter.sizeSol ?? requestedSol };
       } else if (entryDecision.blockedBy !== null) {
         rejectedSignals.push({ index: i, timestamp: candle.timestamp, blockedBy: entryDecision.blockedBy.name });
-        if (entryDecision.blockedBy.name === 'indicators-reliable') indicatorUnreliableBlocks++;
+        if (entryDecision.blockedBy.name === 'indicators-reliable') {
+          indicatorUnreliableBlocks++;
+          const rsiReason = rsi[i]!.reason;
+          const mfiReason = mfi[i]!.reason;
+          const reason = rsiReason === 'gap-in-series' || mfiReason === 'gap-in-series'
+            ? 'gap-in-series'
+            : (rsiReason ?? mfiReason ?? 'unknown');
+          indicatorUnreliableByReason[reason] = (indicatorUnreliableByReason[reason] ?? 0) + 1;
+        }
       }
     }
   }
@@ -300,7 +319,7 @@ export function runBacktest(input: BacktestInput): BacktestResult {
   }
 
   return {
-    trades, rejectedSignals, entryEvaluations, indicatorUnreliableBlocks,
+    trades, rejectedSignals, entryEvaluations, indicatorUnreliableBlocks, indicatorUnreliableByReason,
     startingBalanceSol, endingBalanceSol: balance, poolLiquiditySolUsed: poolLiquiditySol,
   };
 }

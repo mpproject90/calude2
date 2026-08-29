@@ -249,6 +249,28 @@ describe('backtest engine', () => {
     expect(result.indicatorUnreliableBlocks).toBeLessThanOrEqual(result.entryEvaluations);
   });
 
+  it('splits indicator-unreliable blocks by reason: warm-up, then gap-in-series once a gap falls behind the window', () => {
+    // 40 contiguous bars, then a real missing bar (index 15 omitted) — a gap,
+    // not a flagged row. The real 90-day JUP fetch showed this reason split
+    // matters far more than plain warm-up once gaps are dense (DECISIONS §27).
+    const allCloses = Array.from({ length: 40 }, (_, i) => 50 + Math.sin(i / 3) * 10 + i);
+    const full = series(allCloses);
+    const withGap = full.filter((_, i) => i !== 15);
+    const solFlat = flatSol(withGap.length);
+    const gapsHere = detectGaps(withGap, '1h');
+    expect(gapsHere).toHaveLength(1);
+
+    const gapCfg = buildConfig({ indicatorWarmupMultiplier: 3 });   // warm-up = period(2) * 3 = 6
+    const result = runBacktest({
+      token: gapCfg.tokens[0]!, global: gapCfg.global, candles: withGap, solCandles: solFlat, gaps: gapsHere,
+      startingBalanceSol: sol('10'), poolLiquiditySol: null,
+    });
+    expect(result.indicatorUnreliableByReason['insufficient-warmup']).toBeGreaterThan(0);
+    expect(result.indicatorUnreliableByReason['gap-in-series']).toBeGreaterThan(0);
+    const total = Object.values(result.indicatorUnreliableByReason).reduce((s, n) => s + n, 0);
+    expect(total).toBe(result.indicatorUnreliableBlocks);
+  });
+
   it('force-closes a position still open at the series end as end_of_data, never counted as a real exit trigger', () => {
     const patientCfg = buildConfig({}, { exit: { stopLossPct: 80, timeExitCandles: 10_000, rsiExitLevel: 99 } });
     const result = runBacktest({

@@ -13,7 +13,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "config:check": "tsx src/cli/config-check.ts",
-    "data:fetch": "tsx src/cli/fetch-data.ts"
+    "data:fetch": "tsx src/cli/fetch-data.ts",
+    "backtest": "tsx src/cli/backtest.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",
