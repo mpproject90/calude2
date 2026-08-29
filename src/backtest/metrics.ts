@@ -5,6 +5,7 @@
  * hand-built trade lists independent of the engine itself.
  */
 import type { ClosedBacktestTrade } from './engine.js';
+import { sol } from '../util/amount.js';
 
 export interface ExitTriggerStat {
   readonly reason: string;
@@ -122,6 +123,25 @@ export function computeSampleMetrics(
     },
     belowMinimumSampleSize: trades.length < minTradesForConclusion,
   };
+}
+
+/**
+ * Strips costs from an already-produced trade list WITHOUT re-running the
+ * engine (DECISIONS §37) — entries and exits must stay byte-identical, since
+ * re-running with a zeroed cost-floor config would let previously-rejected
+ * bars pass (a looser cost-floor threshold can only admit more trades, never
+ * fewer) and answer a different question than "were THESE trades profitable
+ * before costs." netPnlSol becomes grossPnlSol; costsSol becomes 0;
+ * everything else (entry/exit price, timestamp, reason, MFE) is untouched.
+ */
+export function withZeroCosts(trades: readonly ClosedBacktestTrade[]): ClosedBacktestTrade[] {
+  const zero = sol('0');
+  return trades.map((t) => ({
+    ...t,
+    costsSol: zero,
+    netPnlSol: t.grossPnlSol,
+    costBreakdown: { ...t.costBreakdown, dexFeePct: 0, slippagePct: 0, fixedFeePct: 0, roundTripPct: 0 },
+  }));
 }
 
 export interface BacktestMetrics {

@@ -3,7 +3,7 @@ import type { Candle } from '../src/types/index.js';
 import { aggregateCandles, AggregateError } from '../src/data/aggregate.js';
 import { regimeBucketIndices } from '../src/backtest/regimeAlignment.js';
 import { runBacktest, type ClosedBacktestTrade } from '../src/backtest/engine.js';
-import { computeSampleMetrics, computeBacktestMetrics } from '../src/backtest/metrics.js';
+import { computeSampleMetrics, computeBacktestMetrics, withZeroCosts } from '../src/backtest/metrics.js';
 import { computeEntryFunnel } from '../src/backtest/funnel.js';
 import { decluster, declusterAtWindows, type ClusterableEvent } from '../src/backtest/decluster.js';
 import { parseConfig } from '../src/config/load.js';
@@ -422,6 +422,51 @@ describe('backtest metrics', () => {
     const m = computeBacktestMetrics([], rejected, 50, 0.3);
     expect(m.rejectedByFilter['indicators-reliable']).toBe(2);
     expect(m.rejectedByFilter['filter:regime']).toBe(1);
+  });
+});
+
+describe('withZeroCosts (DECISIONS §37) — isolating gross edge from execution cost', () => {
+  it('sets net P&L equal to gross P&L and zeroes costs, leaving everything else untouched', () => {
+    const original = trade({
+      grossPnlSol: sol('2.5'), costsSol: sol('0.4'), netPnlSol: sol('2.1'),
+      exitReason: 'stop_loss', mfePct: 12.3, barsHeld: 7, entryTimestamp: T0 + 3 * H,
+    });
+    const [z] = withZeroCosts([original]);
+    expect(z!.netPnlSol.toNumberUnsafe()).toBeCloseTo(2.5, 10);
+    expect(z!.costsSol.toNumberUnsafe()).toBe(0);
+    expect(z!.grossPnlSol.toNumberUnsafe()).toBeCloseTo(2.5, 10);   // unchanged
+    expect(z!.exitReason).toBe('stop_loss');
+    expect(z!.mfePct).toBe(12.3);
+    expect(z!.barsHeld).toBe(7);
+    expect(z!.entryTimestamp).toBe(T0 + 3 * H);
+  });
+
+  it('does NOT change which trades exist — same length, same entry/exit indices, order preserved', () => {
+    const trades = [
+      trade({ entryIndex: 0, exitIndex: 1, netPnlSol: sol('-1'), grossPnlSol: sol('-0.6') }),
+      trade({ entryIndex: 5, exitIndex: 8, netPnlSol: sol('3'), grossPnlSol: sol('3.4') }),
+    ];
+    const z = withZeroCosts(trades);
+    expect(z).toHaveLength(2);
+    expect(z.map((t) => [t.entryIndex, t.exitIndex])).toEqual([[0, 1], [5, 8]]);
+  });
+
+  it('can flip a net-negative sample to net-positive once costs are removed, or leave it negative', () => {
+    const costHeavy = [
+      trade({ grossPnlSol: sol('0.5'), costsSol: sol('0.8'), netPnlSol: sol('-0.3') }),
+      trade({ grossPnlSol: sol('0.6'), costsSol: sol('0.8'), netPnlSol: sol('-0.2') }),
+    ];
+    const before = computeSampleMetrics(costHeavy, 50);
+    const after = computeSampleMetrics(withZeroCosts(costHeavy), 50);
+    expect(before.expectancySol).toBeLessThan(0);
+    expect(after.expectancySol).toBeGreaterThan(0);   // gross edge was real; costs alone made it net-negative
+
+    const noEdge = [
+      trade({ grossPnlSol: sol('-1'), costsSol: sol('0.2'), netPnlSol: sol('-1.2') }),
+      trade({ grossPnlSol: sol('-2'), costsSol: sol('0.2'), netPnlSol: sol('-2.2') }),
+    ];
+    const afterNoEdge = computeSampleMetrics(withZeroCosts(noEdge), 50);
+    expect(afterNoEdge.expectancySol).toBeLessThan(0);   // no edge even before costs
   });
 });
 
