@@ -9,12 +9,15 @@ next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 The sample-size blocker from the GeckoTerminal-only path is solved (§33-§34:
 years of Binance-derived history, 356 pooled cross-ups), the resulting
 clustering was quantified and corrected for (§35: 137 effective at a 2-day
-decluster window), and a baseline backtest ran on that pooled series at
-current settings — **result: 10 raw trades / 7 effective declustered
-episodes, far below the 50-trade minimum, no conclusion possible (§36)**.
-See "CEX baseline backtest" below. No parameters have been tuned anywhere
-in this project yet. Verified against `main` by clean clone and
-tree-versus-index diff after every push.
+decluster window), a baseline backtest ran on that pooled series at current
+settings (§36: 10 raw / 7 effective trades, far below the 50-trade
+minimum), and two follow-up diagnostics isolated cost from entry/exit
+quality (§37): **zero-cost expectancy is still negative, but MFE was real
+(avg 5.93% on the 8 time-exits) and the exit apparatus — no trailing stop,
+RSI-recovery never once fired — didn't capture it.** See "Cost/exit
+diagnostics" below. No parameters have been tuned anywhere in this project
+yet. Verified against `main` by clean clone and tree-versus-index diff
+after every push.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -526,6 +529,48 @@ in this baseline specifically so introducing the calendar split later
 doesn't have to unwind an incompatible one first.
 
 **Awaiting operator direction** on the sweep itself.
+
+## Cost/exit diagnostics — zero-cost still negative, but MFE was real (§37)
+
+§36's headline wasn't the trade count — it was costs at 44% of gross
+|P&L|. Operator direction: isolate the cost question before touching any
+parameter, with two specific checks against the SAME 10-trade baseline
+(no re-run of entry logic, no tuning):
+
+**1. Zero-cost isolation** (`withZeroCosts`, `src/backtest/metrics.ts`) —
+strips costs from the already-produced trade list without re-running the
+engine (re-running with a zeroed cost-floor config was rejected: it can
+only ADMIT previously-rejected bars, never exclude any of the original 10,
+so it would silently change the trade set instead of isolating cost).
+
+| | Costed | Zero-cost |
+|---|---|---|
+| Expectancy (SOL) | -0.0406 | -0.0269 |
+| Win rate | 10% | 20% |
+| Profit factor | 0.01 | 0.07 |
+
+**Zero-cost expectancy is still negative.**
+
+**2. Per-trade MFE/holding-period detail** — 8 of 10 trades exited on
+TIME, and every one of those 8 held the full 48-candle limit. Average MFE
+among them: **5.93%**, several above 7-11%. **Zero RSI-recovery exits in
+all 10 trades** — the "back to 70" exit never fired once. `trailingStop.
+enabled: false`, so nothing protects a favorable excursion either.
+
+**Read together, not as a clean binary**: the zero-cost check necessarily
+bakes in the current exit rules (P&L depends on both entry and exit), so
+"unprofitable even before costs" doesn't by itself mean the entry signal
+has no edge. The per-trade evidence shows real favorable excursions in
+most trades that the exit apparatus — no trailing protection, an
+RSI-recovery condition that never fired, a fixed clock several trades ran
+into right past their peak — did not capture. The honest synthesis: this
+baseline's negative zero-cost result looks at least partly like an
+EXIT-side finding, not purely an entry-quality one. N=7 effective is too
+small to trust either reading alone. Full per-trade table in DECISIONS §37.
+
+**Not concluded**: whether the entry signal has no edge, or the exit needs
+a trailing stop / shorter time cap / lower RSI-recovery level, or both —
+operator's call, not decided here.
 
 ## What is deliberately NOT built
 

@@ -1433,3 +1433,79 @@ existing `outOfSampleFraction` split (a trade-count fraction, not a
 calendar boundary) was deliberately NOT used for that purpose in this
 baseline or before, so introducing a real calendar-based split later does
 not have to unwind an incompatible one first.
+
+## 37. Two diagnostics before any sweep: zero-cost expectancy still negative; MFE was real, exits gave it back
+
+**§36's headline wasn't the trade count — it was costs at 44% of gross
+|P&L|.** Operator direction: isolate the cost question before touching any
+parameter. Two specific, narrow diagnostics, both against the SAME 10-trade
+baseline, no re-run of entry logic and no tuning:
+
+**1. Zero-cost isolation — `withZeroCosts`** (`src/backtest/metrics.ts`).
+Re-running `runBacktest` with a zeroed `costFloor` config was considered
+and rejected: cost-floor's required threshold shrinks to 0, which can only
+ADMIT bars previously rejected by it (60 pooled), never exclude any of the
+original 10 — a materially different, larger trade set, answering a
+different question than "were these specific trades profitable before
+costs." Instead, `withZeroCosts` takes the exact 10 `ClosedBacktestTrade`
+records already produced and overrides only `costsSol` (→0) and
+`netPnlSol` (→`grossPnlSol`); entries, exits, prices, timestamps, MFE are
+byte-identical.
+
+| | Costed | Zero-cost |
+|---|---|---|
+| Expectancy (SOL) | -0.0406 | -0.0269 |
+| Win rate | 10% | 20% |
+| Profit factor | 0.01 | 0.07 |
+
+**Zero-cost expectancy is still negative.** Per the operator's own decision
+rule stated in advance: this is the "no edge, tuning won't save it" branch,
+not the "signal works, toll booth is the problem" branch — though see the
+tension with finding 2 below before reading that as final.
+
+**2. Per-trade MFE and holding-period detail, all 10 trades:**
+
+| Token | Entry (UTC) | Bars held | Exit | MFE% | Net P&L (SOL) |
+|---|---|---|---|---|---|
+| JTO | 2023-12-21 21:00 | 45 | stop_loss | 7.33 | -0.0908 |
+| JTO | 2024-02-28 20:00 | 48 | time | 10.69 | -0.0156 |
+| PYTH | 2024-02-29 05:00 | 48 | time | 2.38 | -0.0312 |
+| WIF | 2024-07-07 06:00 | 48 | time | 2.61 | -0.0534 |
+| JTO | 2024-11-15 03:00 | 48 | time | 2.07 | -0.0395 |
+| WIF | 2025-01-18 12:00 | 16 | stop_loss | 0.68 | -0.0908 |
+| JTO | 2025-01-19 13:00 | 48 | time | 8.63 | -0.0103 |
+| RAY | 2025-03-20 20:00 | 48 | time | 8.28 | +0.0039 |
+| PYTH | 2025-07-22 11:00 | 48 | time | 1.01 | -0.0460 |
+| WIF | 2025-07-22 16:00 | 48 | time | 11.79 | -0.0322 |
+
+**8 of 10 trades exited on TIME, and every single one of those 8 held the
+full 48 candles allowed** — the time exit isn't triggering early on
+already-dead trades, it's the ceiling every non-stopped trade ran into.
+Average MFE among the 8 time-exits: **5.93%**, not near zero — half of them
+reached MFE above 7% (10.69, 8.63, 8.28, 11.79). **Zero RSI-recovery exits
+in any of the 10** — RSI never got back to 70 in a single trade, the only
+condition (besides the clock) that would lock in a favorable move under
+the current exit rules. `trailingStop.enabled: false` in config, so there
+is also no mechanism to protect a favorable excursion once it happens.
+
+**Read together, not as a clean binary.** The zero-cost check necessarily
+measures expectancy under the CURRENT exit rules — it cannot isolate entry
+quality from exit quality, because P&L depends on both. Taken alone it says
+"unprofitable even before costs." But the per-trade evidence shows the
+entries WERE followed by real favorable excursions in most cases (MFE up
+to 11.79%, average 5.93% among time-exits) that the exit apparatus did not
+capture: no trailing protection, an RSI-recovery condition that never once
+fired, and a fixed 48-candle clock that several trades ran into right as
+(or after) their peak had already passed. The honest synthesis: this
+baseline's negative zero-cost expectancy is at least partly an EXIT-side
+finding, not purely an entry-quality one — the entry signal is followed by
+real short-term moves; the current exit rules do not reliably convert them
+into locked-in P&L.
+
+**Not concluded here, deliberately** (CLAUDE.md hard rule, and honestly —
+N=7 effective is too small to trust either reading on its own): whether
+this means the entry signal has no edge, whether the exit needs a trailing
+stop or a shorter time cap or a lower RSI-recovery level, or both. That is
+the operator's call, informed by both diagnostics together, not either one
+in isolation. No parameter was changed to produce either number in this
+section.
