@@ -40,8 +40,9 @@ npm run config:check -- config/default.yaml
 npm test
 ```
 
-Expected: `config/default.yaml is valid`, and 183 test cases passing across 9
-files. Nothing above needs network access beyond the npm registry.
+Expected: `config/default.yaml is valid`, and 215 test cases passing across 9
+files (see `docs/STATUS.md` for the breakdown). Nothing above needs network
+access beyond the npm registry.
 
 ### Scripts
 
@@ -78,13 +79,15 @@ own machine.
 
 ```bash
 npm run data:fetch -- --symbol JUP --interval 1h --days 90
-npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db
+npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db --address <JTO's Solana mint>
 npm run data:fetch -- --symbol JUP --provider binance      # alternate path
 ```
 
 GeckoTerminal needs the token's Solana mint address to find its pools: pass
 `--address <mint>`, or add the token to `config/default.yaml`'s `tokens[]` and
-it is looked up by `--symbol` (already true for JUP).
+it is looked up by `--symbol`. Only JUP is in `config/default.yaml` today, so
+`--symbol JUP` resolves with no `--address` needed; any other token (JTO
+included) needs `--address` until it's added to the config.
 
 The GeckoTerminal path pulls the token's **dominant pool against SOL directly**
 — real pool OHLC, no ratio synthesis — plus an independent SOL/USDC reference

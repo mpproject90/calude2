@@ -37,14 +37,14 @@ npm install
 npm test                  # see the test-count table at the bottom of this file, all passing
 
 npm run data:fetch -- --symbol JUP --interval 1h --days 90
-npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db
+npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db --address <JTO's Solana mint>
 ```
 
 Default provider is **GeckoTerminal** (`api.geckoterminal.com`, free, no key —
 DECISIONS §18), chosen because Binance is regionally blocked for this
-project's operator. Needs JUP's mint address to find its pools — already
-resolvable from `config/default.yaml`'s `tokens[]`, or pass `--address <mint>`
-for a token not yet configured. `--provider binance` remains available for
+project's operator. Needs the token's mint address to find its pools — JUP
+resolves from `config/default.yaml`'s `tokens[]` with no flag needed; any other
+token (JTO included, not yet in the config) needs `--address <mint>`. `--provider binance` remains available for
 anyone who can reach `api.binance.com`, using the original synthesis path
 (DECISIONS §6, §14). **Neither will run in a sandboxed cloud environment that
 blocks its host** — that is expected, not a bug.
@@ -240,6 +240,9 @@ From SPEC §10 and decisions made since:
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 183 cases
-across 9 files: `data` 45, `rules` 45, `filters` 29, `indicators` 21, `config`
-14, `repo-hygiene` 9, `amount` 8, `logger` 8, `db` 4.
+Counts are **test cases**, as reported by vitest — never assertions. 215 cases
+across 9 files: `data` 76, `rules` 45, `filters` 29, `indicators` 21, `config`
+14, `repo-hygiene` 10, `amount` 8, `logger` 8, `db` 4. `data` grew from 45 to 76
+with the GeckoTerminal/DexPaprika providers, pool selection and wick/ATR
+diagnostics (DECISIONS §18–§23); `repo-hygiene` grew from 9 to 10 with the
+`.claude/` ignore check.

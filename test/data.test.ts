@@ -701,11 +701,25 @@ describe('pool selection', () => {
 });
 
 describe('wick/ATR diagnostics — the replacement for range-widening on real pool data', () => {
-  it('reports one bar counted, regardless of shape', () => {
+  it('computes the wick-to-body ratio correctly for an ordinary two-sided-wick bar', () => {
+    // open=10, close=12 -> body=2; high=14 -> upper wick=14-12=2;
+    // low=8 -> lower wick=10-8=2. total wick=4, ratio=4/2=2 (hand-computed).
     const d = computeWickDiagnostics([
-      { timestamp: T0, open: 10, high: 10, low: 9, close: 9, volume: 100 },
+      { timestamp: T0, open: 10, high: 14, low: 8, close: 12, volume: 100 },
     ]);
     expect(d.bars).toBe(1);
+    expect(d.wickToBody.p50).toBeCloseTo(2, 10);
+    expect(d.wickToBody.max).toBeCloseTo(2, 10);
+    expect(d.wickToBody.infiniteCount).toBe(0);
+  });
+
+  it('sums asymmetric upper and lower wicks rather than only counting one side', () => {
+    // open=10, close=11 -> body=1; high=13 -> upper wick=13-11=2;
+    // low=9.5 -> lower wick=10-9.5=0.5. total wick=2.5, ratio=2.5/1=2.5.
+    const d = computeWickDiagnostics([
+      { timestamp: T0, open: 10, high: 13, low: 9.5, close: 11, volume: 100 },
+    ]);
+    expect(d.wickToBody.p50).toBeCloseTo(2.5, 10);
   });
 
   it('flags an all-wick (zero-body) bar as an infinite ratio rather than clipping it', () => {
