@@ -1100,3 +1100,90 @@ estimate expectancy — it answers "is this worth a full run" (yes, PYTH looks
 like the best-populated single candidate so far) not "does this make
 money," which §-rule (`CLAUDE.md`) forbids concluding from counts alone
 regardless.
+
+## 33. A scoped exception to §6: Binance's bulk archive for RSI base-rate depth, not final validation
+
+**The blocker after §32:** 6 pooled cross-up events across 6 tokens in 179
+days is not a usable sample, and the 180-day GeckoTerminal free-tier ceiling
+(§29) means no amount of re-fetching gets more history from that source.
+The only way to get a real sample is more calendar time, and the only free
+source with years of it is Binance's own bulk archive.
+
+**Confirmed reachable before writing any code:** `data.binance.vision`
+(HTTP 200 on the root listing) is a distinct domain from `api.binance.com`
+(§14's regionally-blocked live API) — a static file host on a different
+domain is not necessarily blocked just because the API is, and it wasn't.
+
+**Why this does not reverse §6.** §6 rejected USDT-ratio synthesis as the
+*default* data source because a synthesized high/low is the widest
+mathematically possible BOUND, not an observation (`synthesize.ts`) — it
+biases ATR high and MFI's typical price. That objection is entirely about
+high/low. It never reached close: `close_ratio = close_num / close_den` is
+exact, because both sides are sampled at the same instant regardless of
+what happened between candles. RSI is computed from closes alone (spec
+§5.1), so **RSI on a synthesized series is exact**, not approximate. Since
+§31 and §32 both identified the RSI cross-up itself as the binding
+constraint — not MFI, not relative-strength — a data source that is exact
+for RSI and only approximate for the confirming/filtering indicators is
+fit for the specific question being asked (base rate and event count), even
+though it remains unfit for the final validation §6 was written to protect.
+Scope, not reversal: **MFI and ATR stay approximate here, exactly as they
+are for `--provider binance` in `fetch-data.ts`, and every report built
+from this provider must say so.** Real Solana DEX price also differs from
+Binance's CEX price — this data answers "how often does the entry pattern
+fire," not "what would it have paid."
+
+**Built `BinanceHistoricalCandleProvider`** (`src/data/providers/
+binanceHistorical.ts`), behind the same `CandleProvider` interface as
+every other provider. Two request shapes, both to `data.binance.vision`,
+neither rate-limited (confirmed: no 429s across the requests made building
+and testing this):
+- `discoverAvailableMonths(symbol, interval)` — queries the underlying S3
+  bucket's own listing API (`?prefix=...&delimiter=/`) for the true set of
+  published months, rather than guessing a start year and probing
+  backwards. Throws rather than silently under-reporting if the listing is
+  ever truncated (>1000 keys — not reached by any symbol here, checked).
+- `getCandles(token, interval, from, to)` — walks the requested month range,
+  downloading each `SYMBOL-INTERVAL-YYYY-MM.zip` once and caching it to
+  disk **forever** (`data/binance-vision-cache/`) — these archives are
+  published once and never revised, so a cache hit never re-validates
+  against the network. A 404 for an unpublished month is treated as "no
+  data," not an error.
+
+**A real format change caught while building this, not from documentation:**
+Binance's kline archives switched from millisecond to microsecond epoch
+timestamps starting with the **2025-01** monthly file — confirmed directly
+(`SOLUSDT-1h-2024-12` is 13-digit ms; `SOLUSDT-1h-2025-01` onward is
+16-digit µs; every month checked since stays µs). A parser trusting a fixed
+13-digit width, or trusting one cutoff month without checking it directly,
+would have silently mis-timestamped every bar from 2025 onward — Candle
+timestamps would land 1000x in the future and every downstream check
+(alignment with SOL, gap detection, reliability windows) would break
+without an obvious error. `normalizeTimestamp` detects units **per row** by
+magnitude (`> 1e14` ⇒ µs, divide by 1000) rather than trusting a cutoff
+date, so a future format change on either side of that boundary is still
+handled correctly. Would not have been caught by reading Binance's own
+docs — found by fetching real files across a year boundary and comparing
+timestamps to their own filenames' month.
+
+**Listing depth for the 8 symbols this project needs** (all confirmed
+listed, none gapped — month count matches the calendar span exactly for
+every one, checked before writing the provider):
+
+| Symbol | First archive | Last archive (as of this check) | Months |
+|---|---|---|---|
+| SOLUSDT | 2020-08 | 2026-07 | 72 |
+| RAYUSDT | 2021-08 | 2026-07 | 60 |
+| JTOUSDT | 2023-12 | 2026-07 | 32 |
+| BONKUSDT | 2023-12 | 2026-07 | 32 |
+| JUPUSDT | 2024-01 | 2026-07 | 31 |
+| PYTHUSDT | 2024-02 | 2026-07 | 30 |
+| WIFUSDT | 2024-03 | 2026-07 | 29 |
+| ORCAUSDT | 2024-12 | 2026-07 | 20 |
+
+**Scope boundary, stated plainly:** only complete monthly archives are used
+— the current partial month (2026-08) is not included, since Binance does
+not publish it as a monthly file until the month closes. This is a
+recency gap, not a history-depth one; the daily-archive path that would
+close it was not built (not needed for a base-rate study over years of
+history, and not asked for).
