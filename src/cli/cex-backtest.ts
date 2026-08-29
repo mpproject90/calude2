@@ -39,7 +39,7 @@ import { detectSeriesIssues } from '../data/gaps.js';
 import { loadConfig, ConfigError } from '../config/load.js';
 import type { TokenConfig } from '../config/schema.js';
 import { runBacktest, type ClosedBacktestTrade } from '../backtest/engine.js';
-import { computeSampleMetrics, type SampleMetrics } from '../backtest/metrics.js';
+import { computeSampleMetrics, withZeroCosts, type SampleMetrics } from '../backtest/metrics.js';
 import { decluster } from '../backtest/decluster.js';
 import { sol } from '../util/amount.js';
 import { formatErrorChain } from '../util/errorChain.js';
@@ -186,6 +186,69 @@ async function main(): Promise<void> {
     'the effective number as the sample size, not the raw trade count, for the same cross-token\n' +
     'correlation reason the 356-cross-up pool needed declustering.',
   );
+
+  // --- Zero-cost isolation (DECISIONS §37) — SAME trades, SAME exits, costs
+  // stripped from the P&L calc only. Answers "is there gross edge at all,"
+  // separately from "do costs eat it" — re-running with a zeroed cost-floor
+  // config was rejected (see metrics.ts's withZeroCosts doc): a looser floor
+  // can only admit MORE trades, never exclude any of these 10, so it would
+  // silently change the population being measured instead of isolating costs.
+  console.log('\n=== ZERO-COST ISOLATION (DECISIONS §37) — same trades, same exits, gross P&L only ===');
+  const grossOnlyTrades = withZeroCosts(allTrades);
+  const grossOnlyMetrics = computeSampleMetrics(grossOnlyTrades, cfg.global.minTradesForConclusion);
+  printSample('POOLED, ZERO COST', grossOnlyMetrics, effectiveClusters.length);
+  console.log(
+    `\n  costed pooled expectancy:     ${sig(pooledMetrics.expectancySol)} SOL\n` +
+    `  zero-cost pooled expectancy:  ${sig(grossOnlyMetrics.expectancySol)} SOL\n` +
+    `  costed pooled win rate:       ${pct(pooledMetrics.winRate)}\n` +
+    `  zero-cost pooled win rate:    ${pct(grossOnlyMetrics.winRate)}`,
+  );
+  if (grossOnlyMetrics.expectancySol <= 0) {
+    console.log(
+      '\n  Zero-cost expectancy is NOT positive: removing every cost still leaves this trade set\n' +
+      '  unprofitable. No amount of cheaper execution fixes that — the entries+exits themselves\n' +
+      '  are the problem, not the toll booth. (Still N=7 effective — not conclusive, just what\n' +
+      '  this specific baseline sample shows.)',
+    );
+  } else {
+    console.log(
+      '\n  Zero-cost expectancy IS positive: the gross moves in this trade set were real. The costed\n' +
+      '  baseline\'s loss is (at least partly) an execution-cost problem, not an entry-signal\n' +
+      '  problem — different fixes apply (longer holds, bigger targets, cheaper venues), not\n' +
+      '  necessarily different entry/exit rules. (Still N=7 effective — not conclusive.)',
+    );
+  }
+
+  // --- Per-trade detail (DECISIONS §37) — is the time exit cutting profitable
+  // trades short, or was MFE never there to cut short?
+  console.log('\n=== PER-TRADE DETAIL — MFE and bars held, all 10 trades ===');
+  console.log('token    entry (UTC)          barsHeld  exitReason  MFE%     grossPnL    netPnL   costs%ofPos');
+  for (const t of allTrades) {
+    const symbol = tradeSymbol.get(t)!;
+    const gross = t.grossPnlSol.toNumberUnsafe();
+    const net = t.netPnlSol.toNumberUnsafe();
+    console.log(
+      `${symbol.padEnd(8)} ${new Date(t.entryTimestamp).toISOString().slice(0, 16).replace('T', ' ')}  ` +
+      `${String(t.barsHeld).padStart(8)}  ${t.exitReason.padEnd(10)}  ${sig(t.mfePct, 2).padStart(6)}  ` +
+      `${sig(gross, 4).padStart(10)}  ${sig(net, 4).padStart(8)}  ${sig(t.costBreakdown.roundTripPct, 2).padStart(6)}%`,
+    );
+  }
+  const timeExits = allTrades.filter((t) => t.exitReason === 'time');
+  if (timeExits.length > 0) {
+    const avgMfeAtTimeExit = timeExits.reduce((s, t) => s + t.mfePct, 0) / timeExits.length;
+    const avgBarsAtTimeExit = timeExits.reduce((s, t) => s + t.barsHeld, 0) / timeExits.length;
+    const timeExitTemplate = cfg.tokens.find((t2) => t2.symbol === 'JUP')!.exit.timeExitCandles;
+    console.log(
+      `\n  ${timeExits.length} of ${allTrades.length} trades exited on TIME (${timeExitTemplate}-candle limit).\n` +
+      `  Average MFE among them: ${sig(avgMfeAtTimeExit, 2)}%. Average bars held: ${sig(avgBarsAtTimeExit, 1)}` +
+      ` of ${timeExitTemplate} allowed.\n` +
+      (avgMfeAtTimeExit > 2
+        ? '  MFE was meaningfully above zero when time forced these out — worth checking whether the\n' +
+          '  time exit or RSI-recovery level (70) is cutting off moves that were still developing.'
+        : '  MFE stayed close to zero through the time exit — these entries simply were not followed\n' +
+          '  by a favorable move, not a case of a good trade cut short.'),
+    );
+  }
 
   console.log(
     '\nNOTE (CLAUDE.md hard rule): report the numbers above and their limitations; do not conclude\n' +
