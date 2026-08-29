@@ -1327,3 +1327,109 @@ anything built on top of this pooled event set, per operator direction —
 the same declustering is applied to actual backtest TRADES (a smaller,
 downstream population after MFI/relative-strength/regime/cost-floor/
 portfolio filtering) in §36.
+
+## 36. Baseline backtest on the CEX-pooled series: 10 raw trades, 7 effective
+
+**Built `npm run data:cex-backtest`** (`src/cli/cex-backtest.ts`) — runs the
+real `runBacktest` engine (identical strategy code to the DEX path, no
+duplication) per token against the cached Binance-derived TOKEN/SOL history,
+using `config/default.yaml`'s JUP entry as the literal template for every
+token (only `address`/`symbol`/`timeframe` change — no parameter is tuned,
+per operator direction "no sweep yet"). Trades pool across tokens by entry
+timestamp; `computeSampleMetrics` runs on the FULL period only — no in-
+sample/out-of-sample split. That split is deliberately NOT invoked here: the
+operator specified a calendar-based split (first ~3.5y in-sample, last
+~1.5y out-of-sample) to be designed when the sweep is actually built, and
+`computeBacktestMetrics`'s existing split is trade-COUNT-fractional, not
+calendar-based — using it now would establish a different, incompatible
+split and make introducing the intended one later awkward. This run reports
+one number: the whole-period baseline.
+
+**Costs modeled as on-chain execution, not CEX fees** — `config/default.
+yaml`'s real `costFloor` (0.25% DEX fee, 0.0005 SOL priority fee, 0.0001 SOL
+Jito tip), the same config every other run in this project uses. `poolLiquiditySol: null`
+throughout (no real DEX pool exists behind this CEX-derived series), so
+slippage uses the FALLBACK figure (1% per leg) rather than depth-derived
+impact — flagged in every line of the report. Fills are modeled from
+Binance prices, which the report states plainly is optimistic relative to
+a real Jupiter fill (DEX price impact beyond the modelled slippage, MEV,
+routing).
+
+**Result — far thinner than the funnel measurement suggested:**
+
+| Token | Trades | Expectancy (SOL) | Win rate | Profit factor | Max DD (SOL) | Costs (% gross \|P&L\|) |
+|---|---|---|---|---|---|---|
+| JUP | 0 | — | — | — | — | — |
+| JTO | 4 | -0.0391 | 0% | 0.00 | 0.1562 | 50.61% |
+| PYTH | 2 | -0.0386 | 0% | 0.00 | 0.0772 | 54.97% |
+| WIF | 3 | -0.0588 | 0% | 0.00 | 0.1764 | 30.37% |
+| BONK | 0 | — | — | — | — | — |
+| RAY | 1 | +0.0039 | 100% | +Inf | 0.0000 | 77.71% |
+| ORCA | 0 | — | — | — | — | — |
+| **POOLED** | **10 raw / 7 effective** | **-0.0406** | **10%** | **0.01** | **0.4060** | **44.04%** |
+
+Exit trigger breakdown, pooled: **8 time exits, 2 stop-losses — zero
+`rsi_recovery` exits.** Every one of the 10 trades either timed out (48
+candles) or hit its stop; price never recovered enough to trigger the
+"RSI back to 70" exit in any of them. MFE distribution shows the trades
+that DID move favorably reached meaningful peaks (p75=8.63%, max=11.79%)
+without holding there — consistent with moves that reversed rather than
+continued, though N is far too small to read this as a pattern.
+
+**Declustered at DECISIONS §35's 2-day window: 10 raw trades → 7 effective
+independent episodes** — quoted as the honest sample size, not 10. Both
+numbers are printed together in every report from this script per operator
+direction ("if 356 collapses to 120, I want the 120 quoted, not the 356").
+7 is far below `minTradesForConclusion` (50); the engine's own
+`belowMinimumSampleSize` flag fires correctly.
+
+**Reconciling 10 trades against §34's 49 pooled full-funnel-passes — a real
+methodological finding, not a bug.** `computeEntryFunnel` stops at regime
+and does not model cost-floor or position-size at all (its own header
+comment scopes it to `indicators-reliable → prior-overbought → rsi-cross-up
+→ mfi-confirmation → relative-strength → regime`). But the REAL engine's
+filter order (`engine.ts`: `[relStrength, costFloor, positionSizeFilter,
+regimeResult, ...portfolioResults]`) evaluates cost-floor and position-size
+BETWEEN relative-strength and regime, not after it. Traced through JUP
+specifically: 36 mfi-confirmed bars → 29 rejected by relative-strength (7
+remain, matches §34's funnel count) → **3 of those 7 rejected by
+cost-floor, not modeled by the funnel at all** → 4 remain → all 4 rejected
+by regime → 0 trades. The funnel's "1 bar passes regime" figure and the
+real engine's "0 trades" are BOTH correct — they are measuring different
+populations, because cost-floor removes bars from consideration before
+regime ever sees them in the real engine, changing WHICH bars regime is
+evaluated against, not just how many. **The funnel's full-funnel-pass
+count was never a trade-count estimate and should not be read as one** —
+it answers "how often does the technical pattern complete," not "how often
+would the strategy actually enter." Every per-token rejection count
+reconciles exactly against the funnel's counts once this is accounted for
+(cross-checked for all 7 tokens; total pooled rejections + trades =
+168,687, exactly the total pooled entry-evaluation count).
+
+**Small residual differences (a handful of bars per token) between the
+funnel's cross-up/mfi-confirm counts and the real engine's are also
+explained, not a discrepancy to chase further**: the real engine only
+evaluates entries while FLAT (`position === null && pendingEntry ===
+null`) — a would-be signal bar that falls while an earlier trade is still
+open (up to 48 candles / 2 days held) is never evaluated at all in the real
+engine, but the funnel evaluates every bar unconditionally since it does
+not simulate positions.
+
+**Not concluding anything about profitability from this** (CLAUDE.md hard
+rule) — 7 effective trades cannot support one. What this run DOES establish
+as fact, not judgment: at current settings, pooled across 7 liquid tokens
+and years of history, the strategy enters a real position roughly once
+every 4-5 months of combined token-time, and this baseline's particular 7
+episodes lost money on all but one. Whether that changes under a sweep (of
+thresholds still untested: cost-floor's 3x ratio, relative-strength's 5%
+underperformance bar, MFI's 30 threshold, the entry conjunction itself) is
+the next, separate decision — not decided or hinted at here.
+
+**Forward methodology note recorded, nothing built from it yet**: when the
+sweep is designed, split by calendar time — roughly the first 3.5 of the
+~5 years available in-sample, the last ~1.5 out-of-sample — and never
+consult the out-of-sample period while tuning. `computeBacktestMetrics`'s
+existing `outOfSampleFraction` split (a trade-count fraction, not a
+calendar boundary) was deliberately NOT used for that purpose in this
+baseline or before, so introducing a real calendar-based split later does
+not have to unwind an incompatible one first.

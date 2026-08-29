@@ -5,18 +5,16 @@ conversation history, this tells you where the project stands and what happens
 next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
-**Last updated:** still phase 1 step 7 (STOP — awaiting operator review), but
-the sample-size blocker from the GeckoTerminal-only path is now solved.
-Engine validated against a gap-free control, the gap-shadow window
-recalibrated (§28), a real cache-contamination bug found and fixed with pool
-pinning + a schema migration (§29–§30), a 179-day pinned run still found
-only 2 near-misses and cleared MFI's calibration (§31), a 6-token
-`data:screen` pooled only 6 cross-ups — still too thin (§32) — so a Binance
-bulk-archive provider was built as a scoped, documented exception to §6
-(§33) and run against years of real history for SOL + 7 tokens: **356
-pooled cross-up events, real cross-token clustering found and quantified
-(§34)**. See "CEX base-rate study" below. Verified against `main` by clean
-clone and tree-versus-index diff after every push.
+**Last updated:** still phase 1 step 7 (STOP — awaiting operator review).
+The sample-size blocker from the GeckoTerminal-only path is solved (§33-§34:
+years of Binance-derived history, 356 pooled cross-ups), the resulting
+clustering was quantified and corrected for (§35: 137 effective at a 2-day
+decluster window), and a baseline backtest ran on that pooled series at
+current settings — **result: 10 raw trades / 7 effective declustered
+episodes, far below the 50-trade minimum, no conclusion possible (§36)**.
+See "CEX baseline backtest" below. No parameters have been tuned anywhere
+in this project yet. Verified against `main` by clean clone and
+tree-versus-index diff after every push.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -145,7 +143,7 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates |
 | Rules | `src/rules/` | entry conditions, intrabar exits, portfolio limits |
 | Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
-| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study — §33–§34), `backtest` |
+| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study + declustering — §33–§35), `data:cex-backtest` (baseline backtest on the CEX-pooled series — §36), `backtest` |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
 
 **Nothing here can place a trade.** There is no execution layer and no code path
@@ -464,6 +462,70 @@ Full breakdown (busiest-days list, per-token event counts) in DECISIONS §34.
 was a baseline read only. **Awaiting operator direction** on the
 in-sample/out-of-sample sweep design against these 356 (or ~210 effective)
 events.
+
+## Declustering + CEX baseline backtest — 7 effective trades, no conclusion possible (§35–§36)
+
+Operator direction: quantify the clustering above before trusting any
+metric built on it. `decluster()`/`declusterAtWindows()`
+(`src/backtest/decluster.ts`) chain-merge events within a rolling window;
+tested at 1/2/3/7 days on the 356 pooled cross-ups:
+
+| Window | Effective | 3+-token clusters |
+|---|---|---|
+| 1d | 160 | 13 |
+| 2d | 137 | 18 |
+| 3d | 123 | 21 |
+| 7d | 64 | 28 |
+
+**Chose the 2-day window (137 effective)** — matches the strategy's own
+`priorOverboughtWithinCandles=50h` definition of "one cycle," and the decay
+is smooth through 3 days before falling off a cliff at 7 (density-driven
+chain runaway past that point, not genuine episode merging). 137, not 356,
+is the number quoted from here on.
+
+`npm run data:cex-backtest` then ran the real `runBacktest` engine (no
+duplicated logic) per token against the cached CEX history, current
+settings only (JUP's config as the template for every token, nothing
+tuned), pooling trades and declustering their entry timestamps at the same
+2-day window:
+
+| Token | Trades | Expectancy (SOL) | Win rate | Profit factor | Costs (% gross P&L) |
+|---|---|---|---|---|---|
+| JUP | 0 | — | — | — | — |
+| JTO | 4 | -0.0391 | 0% | 0.00 | 50.61% |
+| PYTH | 2 | -0.0386 | 0% | 0.00 | 54.97% |
+| WIF | 3 | -0.0588 | 0% | 0.00 | 30.37% |
+| BONK | 0 | — | — | — | — |
+| RAY | 1 | +0.0039 | 100% | +Inf | 77.71% |
+| ORCA | 0 | — | — | — | — |
+| **POOLED** | **10 raw / 7 effective** | **-0.0406** | **10%** | **0.01** | **44.04%** |
+
+Exit breakdown, pooled: 8 time exits, 2 stop-losses, **zero rsi_recovery
+exits** — no trade in this baseline ever recovered enough to trigger the
+"back to 70" exit. Costs modeled as real on-chain execution (DEX fee +
+priority fee + Jito tip + fallback slippage, `config/default.yaml`'s real
+`costFloor`), not CEX fees; fills are from Binance prices, flagged as
+optimistic vs. a real DEX fill in every line of the report.
+
+**7 effective trades is far below the 50-trade minimum — no conclusion
+about profitability is possible or claimed.** A real methodological finding
+surfaced while reconciling this against §34's 49 pooled full-funnel-passes:
+`computeEntryFunnel` doesn't model cost-floor or position-size at all, and
+the real engine evaluates them BETWEEN relative-strength and regime, not
+after — so the funnel's "N bars pass regime" was never a trade-count
+estimate; it measures a different population than actual trade viability.
+Traced exactly for JUP (36 mfi-confirms → 7 clear relative-strength → 3
+rejected by cost-floor, unmodeled by the funnel → 4 remain → all 4 rejected
+by regime → 0 trades) — full reconciliation in DECISIONS §36.
+
+**Forward note, not yet built:** when a sweep is designed, split by
+calendar time (~first 3.5 of 5 years in-sample, last ~1.5 out-of-sample),
+never touching out-of-sample while tuning. Deliberately not implemented
+yet — the existing `outOfSampleFraction` trade-count split was not invoked
+in this baseline specifically so introducing the calendar split later
+doesn't have to unwind an incompatible one first.
+
+**Awaiting operator direction** on the sweep itself.
 
 ## What is deliberately NOT built
 
