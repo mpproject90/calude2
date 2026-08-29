@@ -294,6 +294,58 @@ free, so it runs only with `--pool-liquidity-sol <amount>` supplied, and is
 explicitly marked "not evaluated" (never silently skipped) otherwise — this
 run used no liquidity figure, so the cap was not enforced.
 
+## Second real backtest run — JUP, 1h, 179 days, N=63 shadow (superseded the 90-day run above)
+
+Investigated three operator questions after the 90-day run above: is the
+engine actually working (0 trades looks identical whether it's broken or
+just gap-starved), is the 98-bar gap shadow numerically justified, and would
+more data or a different interval help. Findings and the resulting changes:
+
+- **Engine validated** by running it against SOL/USDC (0 gaps) as a control
+  — 2 real near-misses found (a genuine RSI cross-up blocked by MFI missing
+  the threshold by 0.55 points), proving the rule evaluation is coherent,
+  not stuck (DECISIONS §27's addendum, this session).
+- **Gap shadow cut from 98 to 63 bars** (period × 4.5, not × 7) — a 1%
+  Wilder-decay contamination budget instead of 0.1%'s, chosen because
+  RSI/MFI feed a threshold (30/70) picked by convention, not calibrated to a
+  tenth of a point (DECISIONS §28, config default changed, now configurable
+  and no longer required to be an integer).
+- **Found and fixed real cache contamination**: GeckoTerminal pool selection
+  is not stable run-to-run under rate-limit attrition, and a re-fetch
+  silently overwrote a previously-validated pool's candles with a much
+  thinner pool's, for every overlapping timestamp — confirmed happening in
+  normal use. Fixed at the root: `pool_address` is now part of the `candles`
+  primary key (schema v2), and pool discovery can be skipped entirely via
+  pinning (`--pool-address`/`tokens[].pinnedPoolAddress`,
+  `--sol-pool-address`/`global.solReferencePoolAddress`) — DECISIONS §29–§30.
+- **179 days is achievable with pinning**: the un-pinned attempt lost 5 of 6
+  JUP/SOL candidates to rate-limit attrition; pinned, JUP/SOL completed with
+  zero 429s and SOL/USDC completed despite needing retries. Coverage: JUP/SOL
+  91.78% (3944/4297, 283 gaps), SOL/USDC 100%. Gap density by month ranges
+  5.14–12.06%, a mild upward trend, not one catastrophic month (table in
+  DECISIONS §31).
+- **Still 0 trades at N=63 on 179 days.** 86.64% of evaluations blocked by
+  unreliable indicators (down from 92.40% at the old N=98/90-day setting,
+  but the gap density here still dominates). Of the 527 evaluations with
+  reliable indicators, exactly 2 cleared both prior-overbought and RSI-
+  cross-up — same rare-near-miss shape as the SOL/USDC control, not a
+  regression.
+- **MFI's 30 threshold is not miscalibrated.** Computed MFI's value at every
+  RSI-cross-up-through-30 event on the gap-free SOL/USDC series (n=59): MFI
+  confirmed (<30) 55.9% of the time, and its median/mean AT the cross-up
+  moment (29.03/29.15) sit almost exactly on the threshold. The earlier 0-of-
+  2 near-miss impression was small-sample noise. DECISIONS §31 has the full
+  distribution and the reasoning.
+
+**Awaiting operator direction** on what, if anything, to do about the 0-trade
+result now that the engine, the shadow window and the MFI threshold have all
+been checked and none of them look like the explanation. The remaining
+candidates are: this specific token/pool's price action genuinely didn't
+produce the setup more than twice in 179 days, or a structural review of the
+entry conjunction (three conditions that each fire independently but rarely
+align) is warranted — not decided here (CLAUDE.md hard rule: report, don't
+conclude).
+
 ## What is deliberately NOT built
 
 - **DexPaprika's pool-discovery/selection integration** — the provider client

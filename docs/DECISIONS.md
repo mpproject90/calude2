@@ -963,3 +963,56 @@ actual confidence in, chosen specifically to test whether pinning is what
 makes a 179-day fetch achievable under the free tier's rate limit (§29's
 179-day attempt lost 5 of JUP/SOL's 6 candidates to rate-limit attrition
 before pinning existed).
+
+## 31. Pinning worked; the 179-day backtest still found 0 trades; MFI at 30 is not miscalibrated
+
+**Pinning fixed the fetch.** Re-run with §30's pinning against a wiped,
+schema-v2 database: JUP/SOL's pool completed with ZERO 429s. SOL/USDC's
+pinned pool needed retries on most pages but never exhausted its 4-attempt
+budget — the full 179-day fetch succeeded end to end. Coverage: JUP/SOL 3944
+of 4297 bars (91.78%, 283 gaps, 352 missing), SOL/USDC 100% (0 gaps),
+essentially the same profile the 90-day review found — confirms discovery
+was the expensive part, not OHLCV pagination itself.
+
+**Gap density by month, checked for concentration (operator's question):**
+5.14% (June) to 12.06% (August), a mild upward trend, not one catastrophic
+month:
+
+| Month | Missing | Expected | Missing % |
+|---|---|---|---|
+| 2026-03 | 39 | 688 | 5.67% |
+| 2026-04 | 60 | 720 | 8.33% |
+| 2026-05 | 65 | 744 | 8.74% |
+| 2026-06 | 37 | 720 | 5.14% |
+| 2026-07 | 69 | 744 | 9.27% |
+| 2026-08 | 82 | 680 | 12.06% |
+
+**The N=63 backtest (§28) against this data: still 0 trades.** 86.64%
+of entry evaluations blocked by unreliable indicators (down from 92.40% at
+N=98 on the 90-day series — the smaller shadow helped, as designed, but the
+gap density here is high enough that it still dominates: 3355 `gap-in-series`
+vs 62 `insufficient-warmup`). Of the 527 evaluations that DID have reliable
+indicators, only 2 ever cleared both prior-overbought and RSI-cross-up — one
+blocked by relative-strength, one by MFI. Same shape as the SOL/USDC control
+run (§27): rare, coherent near-misses, not a broken engine.
+
+**The MFI-at-30 question, answered with real data, not the earlier n=2
+near-miss sample.** Computed MFI's value at every reliable RSI-cross-up-
+through-30 event across the full 179-day window:
+
+| Series | Cross-ups | MFI confirms (<30) | min | p25 | median | mean | p75 | max |
+|---|---|---|---|---|---|---|---|---|
+| SOL/USDC (0 gaps, n=59) | 59 | 33 (55.9%) | 8.94 | 21.12 | 29.03 | 29.15 | 35.60 | 57.96 |
+| JUP/SOL (283 gaps, n=4) | 4 | 2 (50.0%) | 21.34 | — | 30.36 | 27.54 | — | 34.98 |
+
+**30 is not miscalibrated.** On the large, gap-free SOL/USDC sample, MFI's
+median AND mean at the moment of an RSI cross-up sit at 29.03/29.15 —
+essentially exactly the 30 threshold, not systematically above it. The
+confirm rate (55.9%) is close to a coin flip: MFI is doing real, roughly
+even-odds filtering work at this threshold, not rejecting almost everything.
+The earlier impression from §27's 90-day SOL run (0 of 2 confirmed) was
+small-sample noise, not a signal — `binomial(2, p=0.559)` misses both
+outcomes about 19% of the time by chance alone, unremarkable at n=2. The
+conjunction (prior-overbought AND cross-up AND MFI-confirm, together) being
+rare is a genuinely rare CONJUNCTION of three independent-ish conditions,
+not evidence any single one of them — MFI included — is set wrong.
