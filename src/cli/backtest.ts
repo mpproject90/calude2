@@ -54,6 +54,26 @@ if (poolLiquidityArg !== undefined && (!Number.isFinite(poolLiquiditySol) || poo
   throw new Error('--pool-liquidity-sol must be a positive number');
 }
 
+/**
+ * Which pool's cached candles to read (schema v2, DECISIONS §29). An explicit
+ * --pool-address/--sol-pool-address always wins; otherwise the most recently
+ * fetched pool for this token/interval is used, with a note if more than one
+ * is cached — a real possibility now that pool selection can vary run to run.
+ */
+function resolvePoolAddress(repo: CandleRepository, token: string, interval: Interval, explicit: string | undefined): string {
+  if (explicit !== undefined) return explicit;
+  const pools = repo.cachedPools(token, interval);
+  if (pools.length === 0) return '';   // no cache yet; the empty-candles check right after reports this clearly
+  if (pools.length > 1) {
+    console.log(
+      `NOTE: ${pools.length} different pools are cached for ${token}/${interval} — using the most ` +
+      `recently fetched (${pools[0]!.poolAddress || '(non-pool provider)'}). Pass --pool-address/` +
+      '--sol-pool-address to pick a specific one.',
+    );
+  }
+  return pools[0]!.poolAddress;
+}
+
 function pct(n: number): string { return `${(n * 100).toFixed(2)}%`; }
 function sig(n: number, digits = 4): string { return Number.isFinite(n) ? n.toFixed(digits) : (n > 0 ? '+Inf' : n < 0 ? '-Inf' : 'NaN'); }
 
@@ -90,17 +110,22 @@ async function main(): Promise<void> {
 
   const db = openDb(dbPath);
   const repo = new CandleRepository(db);
+
+  const poolAddress = resolvePoolAddress(repo, symbol, interval, flag('pool-address'));
+  const solPoolAddress = resolvePoolAddress(repo, 'SOL', interval, flag('sol-pool-address'));
+
   const wideOpen = { from: 0, to: Date.now() };
-  const candles = repo.getCandles(symbol, interval, wideOpen.from, wideOpen.to);
-  const solCandles = repo.getCandles('SOL', interval, wideOpen.from, wideOpen.to);
+  const candles = repo.getCandles(symbol, interval, wideOpen.from, wideOpen.to, poolAddress);
+  const solCandles = repo.getCandles('SOL', interval, wideOpen.from, wideOpen.to, solPoolAddress);
   db.close();
 
   if (candles.length === 0) {
-    throw new Error(`no cached ${symbol} candles at ${interval} in ${dbPath} — run "npm run data:fetch" first`);
+    throw new Error(`no cached ${symbol} candles at ${interval}${poolAddress ? ` for pool ${poolAddress}` : ''} in ${dbPath} — run "npm run data:fetch" first`);
   }
   if (solCandles.length === 0) {
-    throw new Error(`no cached SOL candles at ${interval} in ${dbPath} — the regime and relative-strength filters need it`);
+    throw new Error(`no cached SOL candles at ${interval}${solPoolAddress ? ` for pool ${solPoolAddress}` : ''} in ${dbPath} — the regime and relative-strength filters need it`);
   }
+  console.log(`Pool: ${poolAddress || '(non-pool provider)'}   SOL reference pool: ${solPoolAddress || '(non-pool provider)'}`);
 
   const gaps = detectSeriesIssues(candles, interval).gaps;
 

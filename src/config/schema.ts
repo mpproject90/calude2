@@ -112,6 +112,17 @@ export const tokenSchema = z.object({
   exit: exitSchema,
   limits: limitsSchema,
   expectedMove: expectedMoveSchema.default({ atrPeriod: 14, atrMultiplier: 2.0 }),
+  /**
+   * Skip GeckoTerminal pool discovery/dominance-comparison for this token and
+   * fetch this exact pool's OHLCV directly (DECISIONS §29/§30). Fixes the
+   * root cause of pool-selection instability (rate-limit-driven candidate
+   * exclusion can hand a re-fetch a different pool than last time) rather
+   * than working around it — at the cost of never learning whether dominance
+   * migrated during the window, since no comparison is made. `data:fetch`
+   * prints this prominently and the CLI's `--pool-address` flag overrides it
+   * for a one-off run without editing the config.
+   */
+  pinnedPoolAddress: solanaAddress.optional(),
 });
 
 /** §6.1 Tier A gates. */
@@ -165,6 +176,14 @@ export const regimeFilterSchema = z.object({
 
 export const globalSchema = z.object({
   mode: z.enum(['backtest', 'paper', 'live']).default('backtest'),
+  /**
+   * Pin the SOL/USD(C) reference pool `data:fetch` uses for the regime and
+   * relative-strength filters (DECISIONS §20, §29/§30) — shared across all
+   * tokens, unlike `tokens[].pinnedPoolAddress`, since there is one reference
+   * series, not one per token. Same tradeoff: skips dominance comparison for
+   * this series in exchange for a stable pool between runs.
+   */
+  solReferencePoolAddress: solanaAddress.optional(),
   maxConcurrentPositions: z.number().int().positive().default(3),
   dailyLossLimitPct: pct.default(10),
   maxDeployedCapitalPct: pct.default(50),

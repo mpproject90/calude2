@@ -4,6 +4,12 @@
 
 global:
   mode: backtest
+  # Pins the SOL/USD(C) reference pool data:fetch uses for the regime and
+  # relative-strength filters (DECISIONS §20, §29/§30) — Orca's deep SOL/USDC
+  # pool, ~$25M reserve at time of writing. Skips discovery/dominance
+  # comparison for this series in exchange for a stable pool between runs and
+  # far fewer requests; --sol-pool-address overrides this for a one-off run.
+  solReferencePoolAddress: "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE"
   maxConcurrentPositions: 3
   dailyLossLimitPct: 10
   maxDeployedCapitalPct: 50
@@ -50,6 +56,12 @@ tokens:
     tier: A
     timeframe: 1h
     buyAmountSol: "0.5"
+    # Pins the meteora JUP/SOL pool validated across this project's real-data
+    # reviews (DECISIONS §24-§27, ~$1.38M reserve at time of writing) rather
+    # than re-discovering and comparing candidates every fetch — the root fix
+    # for pool-selection instability under rate limiting (DECISIONS §29/§30).
+    # --pool-address overrides this for a one-off run.
+    pinnedPoolAddress: "C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg"
     rsi:
       period: 14
       oversold: 30

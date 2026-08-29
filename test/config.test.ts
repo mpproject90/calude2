@@ -90,6 +90,31 @@ describe('config validation', () => {
   });
 });
 
+describe('pool pinning (DECISIONS §29/§30)', () => {
+  const POOL = 'C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg';
+
+  it('is optional — omitting it leaves discovery/dominance comparison in play', () => {
+    const cfg = parseConfig({ global: {}, tokens: [token()] });
+    expect(cfg.tokens[0]!.pinnedPoolAddress).toBeUndefined();
+    expect(cfg.global.solReferencePoolAddress).toBeUndefined();
+  });
+
+  it('accepts a pinned pool address per token and a shared SOL reference pool', () => {
+    const cfg = parseConfig({
+      global: { solReferencePoolAddress: POOL },
+      tokens: [token({ pinnedPoolAddress: POOL })],
+    });
+    expect(cfg.tokens[0]!.pinnedPoolAddress).toBe(POOL);
+    expect(cfg.global.solReferencePoolAddress).toBe(POOL);
+  });
+
+  it('rejects a pinned pool address that is not a valid base58 Solana address', () => {
+    expect(() => parseConfig({
+      global: {}, tokens: [token({ pinnedPoolAddress: 'not-an-address' })],
+    })).toThrow(ConfigError);
+  });
+});
+
 describe('live trading gate', () => {
   const live = () => parseConfig({ global: { mode: 'live' }, tokens: [token()] });
 

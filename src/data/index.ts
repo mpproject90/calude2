@@ -21,6 +21,9 @@ export interface CandleServiceOptions {
   readonly logger: Logger;
 }
 
+/** CandleService is Binance-only (DECISIONS §18) — no pool concept, so '' throughout (schema v2, §29). */
+const NO_POOL = '';
+
 export class CandleService {
   private readonly repo: CandleRepository;
 
@@ -43,7 +46,7 @@ export class CandleService {
       throw new Error(`provider ${provider.name} does not support interval ${interval}`);
     }
 
-    for (const range of this.repo.missingRanges(token, interval, from, to)) {
+    for (const range of this.repo.missingRanges(token, interval, from, to, NO_POOL)) {
       log.info('fetching uncached range', { from: range.from, to: range.to });
       const raw = await provider.getCandles(token, interval, range.from, range.to);
 
@@ -53,14 +56,14 @@ export class CandleService {
           count: rejected.length,
           reasons: [...new Set(rejected.map((r) => r.reason))],
         });
-        this.repo.recordRejected(token, interval, rejected);
+        this.repo.recordRejected(token, interval, rejected, NO_POOL);
       }
 
-      this.repo.upsertCandles(token, interval, valid, provider.name);
-      this.repo.recordFetch(token, interval, range.from, range.to, provider.name, valid.length);
+      this.repo.upsertCandles(token, interval, valid, provider.name, NO_POOL);
+      this.repo.recordFetch(token, interval, range.from, range.to, provider.name, valid.length, NO_POOL);
     }
 
-    const candles = this.repo.getCandles(token, interval, from, to);
+    const candles = this.repo.getCandles(token, interval, from, to, NO_POOL);
     const issues = detectSeriesIssues(candles, interval);
 
     if (issues.gaps.length > 0) {
@@ -68,7 +71,7 @@ export class CandleService {
         gapCount: issues.gaps.length,
         missingBars: issues.gaps.reduce((n, g) => n + g.missingBars, 0),
       });
-      this.repo.recordGaps(token, interval, issues.gaps);
+      this.repo.recordGaps(token, interval, issues.gaps, NO_POOL);
     }
     if (issues.duplicates.length > 0 || issues.outOfOrder.length > 0) {
       log.error('candle series is malformed', {
@@ -81,7 +84,7 @@ export class CandleService {
   }
 
   cached(token: string, interval: Interval, from: number, to: number): Candle[] {
-    return this.repo.getCandles(token, interval, from, to);
+    return this.repo.getCandles(token, interval, from, to, NO_POOL);
   }
 
   get repository(): CandleRepository {

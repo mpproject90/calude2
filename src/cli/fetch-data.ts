@@ -3,7 +3,7 @@
  * reviewing the data layer against live data before the backtest is built.
  *
  *   npm run data:fetch -- --symbol JUP --interval 1h --days 90
- *   npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db
+ *   npm run data:fetch -- --symbol JUP --interval 1h --days 179 --pool-address C8Gr...
  *   npm run data:fetch -- --symbol JUP --provider binance          # alternate, DECISIONS §18
  *
  * DEFAULT PROVIDER is GeckoTerminal (api.geckoterminal.com, free & keyless —
@@ -14,7 +14,19 @@
  * (DECISIONS §20). Requires outbound access to api.geckoterminal.com — no API
  * key. Needs the token's Solana mint address: pass `--address <mint>`, or add
  * the token to `config/default.yaml`'s `tokens[]` and it is looked up by
- * `--symbol`.
+ * `--symbol`. **The free tier only serves the past 180 days** — a `--days`
+ * value beyond that 401s (DECISIONS §29).
+ *
+ * POOL PINNING (DECISIONS §29/§30) — skip discovery and dominance comparison
+ * entirely for a known-good pool:
+ *   --pool-address <addr>      pins the traded token's pool for this run
+ *   --sol-pool-address <addr>  pins the SOL/USD(C) reference pool
+ * or set it once, reproducibly, in config: `tokens[].pinnedPoolAddress` and
+ * `global.solReferencePoolAddress` — the CLI flag overrides the config value
+ * when both are given. Pinning trades away this run's dominance-migration
+ * check for a stable pool between runs and far fewer requests (no candidate
+ * discovery/comparison), which is also what fixes the rate-limit-driven
+ * pool-selection instability that caused real cache contamination (§29).
  *
  * `--provider binance` keeps the ORIGINAL path (DECISIONS §14): pulls
  * <SYMBOL>USDT and SOLUSDT and synthesizes <SYMBOL>/SOL, subject to DECISIONS
@@ -114,37 +126,68 @@ function writeRawSample(samples: readonly unknown[], meta: Record<string, unknow
 }
 
 // ---------------------------------------------------------------------------
-// GeckoTerminal path (default) — DECISIONS §18, §19, §20, §23
+// GeckoTerminal path (default) — DECISIONS §18, §19, §20, §23, §29, §30
 // ---------------------------------------------------------------------------
 
-function resolveTokenAddress(sym: string): string {
+interface LightConfig {
+  readonly tokens?: readonly { symbol?: string; address?: string; pinnedPoolAddress?: string }[];
+  readonly global?: { solReferencePoolAddress?: string };
+}
+
+function readLightConfig(): LightConfig {
+  try {
+    return parseYaml(readFileSync('config/default.yaml', 'utf8')) as LightConfig;
+  } catch {
+    return {};
+  }
+}
+
+function resolveTokenAddress(sym: string, cfg: LightConfig): string {
   const explicit = flag('address');
   if (explicit !== undefined) return explicit;
-  try {
-    const cfg = parseYaml(readFileSync('config/default.yaml', 'utf8')) as {
-      tokens?: readonly { symbol?: string; address?: string }[];
-    };
-    const entry = cfg.tokens?.find((t) => t.symbol === sym);
-    if (entry?.address !== undefined) return entry.address;
-  } catch {
-    // fall through to the error below — config lookup is a convenience, not a requirement
-  }
+  const entry = cfg.tokens?.find((t) => t.symbol === sym);
+  if (entry?.address !== undefined) return entry.address;
   throw new Error(
     `no Solana mint address for "${sym}" — pass --address <mint>, or add it to ` +
     'config/default.yaml\'s tokens[] so it can be looked up by --symbol',
   );
 }
 
-interface DominantPull {
-  readonly candles: readonly Candle[];
-  readonly pool: string | null;
-  readonly candidates: readonly PoolCandidate[];
-  readonly dominance: PoolDominanceResult;
+/** CLI flag wins over config; both optional — null means "discover normally." */
+function resolvePinnedTokenPool(sym: string, cfg: LightConfig): string | null {
+  const explicit = flag('pool-address');
+  if (explicit !== undefined) return explicit;
+  return cfg.tokens?.find((t) => t.symbol === sym)?.pinnedPoolAddress ?? null;
 }
 
-async function pullDominant(
+function resolvePinnedSolPool(cfg: LightConfig): string | null {
+  const explicit = flag('sol-pool-address');
+  if (explicit !== undefined) return explicit;
+  return cfg.global?.solReferencePoolAddress ?? null;
+}
+
+interface PoolResolution {
+  readonly candles: readonly Candle[];
+  readonly pool: string | null;
+  readonly pinned: boolean;
+  readonly candidates: readonly PoolCandidate[];
+  readonly dominance: PoolDominanceResult | null;
+}
+
+async function resolvePoolSeries(
   label: string, tokenMint: string, pairedMint: string, gecko: GeckoTerminalCandleProvider,
-): Promise<DominantPull> {
+  pinnedAddress: string | null,
+): Promise<PoolResolution> {
+  if (pinnedAddress !== null) {
+    console.log(
+      `\n${label}: PINNED to ${pinnedAddress} — pool discovery and dominance comparison ` +
+      'SKIPPED for this run (DECISIONS §29/§30). Trading determinism and far fewer requests ' +
+      'for the ability to notice a dominance shift.',
+    );
+    const candles = await gecko.getPoolOhlcv(pinnedAddress, interval, from, to);
+    return { candles, pool: pinnedAddress, pinned: true, candidates: [], dominance: null };
+  }
+
   const candidates = await gecko.searchPools(tokenMint, pairedMint);
   console.log(`\n${label} pool candidates: ${candidates.length}`);
   for (const c of candidates) {
@@ -158,12 +201,10 @@ async function pullDominant(
   // DECISIONS §24) should not sink the whole pull when other candidates
   // already succeeded — only fail closed if EVERY candidate fails.
   const series: PoolSeries[] = [];
-  const failed: { address: string; error: unknown }[] = [];
   for (const c of candidates) {
     try {
       series.push({ address: c.address, candles: await gecko.getPoolOhlcv(c.address, interval, from, to) });
     } catch (err) {
-      failed.push({ address: c.address, error: err });
       console.log(`  WARNING: ${c.address} (dex=${c.dex}) failed and is excluded from selection:`);
       console.log(`    ${formatErrorChain(err).split('\n').join('\n    ')}`);
     }
@@ -187,37 +228,42 @@ async function pullDominant(
   }
 
   const winner = dominance.selected === null ? undefined : series.find((s) => s.address === dominance.selected);
-  return { candles: winner?.candles ?? [], pool: dominance.selected, candidates, dominance };
+  return { candles: winner?.candles ?? [], pool: dominance.selected, pinned: false, candidates, dominance };
 }
 
-function cacheAndReport(repo: CandleRepository, token: string, candles: readonly Candle[], provider: string): Candle[] {
+function cacheAndReport(
+  repo: CandleRepository, token: string, candles: readonly Candle[], provider: string, poolAddress: string,
+): Candle[] {
   const { valid, rejected } = validateCandles(candles, interval);
   if (rejected.length > 0) {
     log.warn('rejected invalid candles', { token, count: rejected.length, reasons: [...new Set(rejected.map((r) => r.reason))] });
-    repo.recordRejected(token, interval, rejected);
+    repo.recordRejected(token, interval, rejected, poolAddress);
   }
-  repo.upsertCandles(token, interval, valid, provider);
-  repo.recordFetch(token, interval, from, to, provider, valid.length);
+  repo.upsertCandles(token, interval, valid, provider, poolAddress);
+  repo.recordFetch(token, interval, from, to, provider, valid.length, poolAddress);
 
-  const stored = repo.getCandles(token, interval, from, to);
+  const stored = repo.getCandles(token, interval, from, to, poolAddress);
   const issues = detectSeriesIssues(stored, interval);
-  if (issues.gaps.length > 0) repo.recordGaps(token, interval, issues.gaps);
+  if (issues.gaps.length > 0) repo.recordGaps(token, interval, issues.gaps, poolAddress);
 
   report(token, stored, issues.gaps);
-  console.log(`  rejected       ${repo.countRejected(token, interval)}`);
+  console.log(`  rejected       ${repo.countRejected(token, interval, poolAddress)}`);
   return stored;
 }
 
 async function runGeckoTerminal(): Promise<void> {
   console.log(`Fetching ${symbol}/SOL and SOL/USDC from GeckoTerminal, ${interval}, ${days}d -> ${dbPath}`);
   console.log(
-    '\nNOTE: the candle cache is keyed by (token, interval, timestamp) only — it does not\n' +
-    'record which provider or quote asset produced a row (latest write wins on conflict).\n' +
-    'Use a fresh --db path when switching --provider for a symbol you have already fetched,\n' +
-    'or rows quoted in a different asset will silently blend into the same series.',
+    '\nNOTE (schema v2, DECISIONS §29): the candle cache is keyed by (token, interval,\n' +
+    'pool_address, timestamp) — two different pools\' candles for the same token/interval\n' +
+    'coexist rather than one overwriting the other. --provider binance rows use pool_address\n' +
+    '\'\' (not pool-based). Readers must know which pool_address they want; this CLI always does.',
   );
 
-  const tokenAddress = resolveTokenAddress(symbol);
+  const cfg = readLightConfig();
+  const tokenAddress = resolveTokenAddress(symbol, cfg);
+  const pinnedTokenPool = resolvePinnedTokenPool(symbol, cfg);
+  const pinnedSolPool = resolvePinnedSolPool(cfg);
   const rawSamples: GtRawSample[] = [];
   const onRawSample = (s: GtRawSample): void => { rawSamples.push(s); };
   const onRateLimit = (e: RateLimitEvent): void => {
@@ -239,17 +285,17 @@ async function runGeckoTerminal(): Promise<void> {
   let tokenCandles: Candle[] = [];
 
   try {
-    const tokenPull = await pullDominant(`${symbol}/SOL`, tokenAddress, SOL_MINT, gecko);
+    const tokenPull = await resolvePoolSeries(`${symbol}/SOL`, tokenAddress, SOL_MINT, gecko, pinnedTokenPool);
     tokenPool = tokenPull.pool;
-    const solPull = await pullDominant('SOL/USDC', SOL_MINT, USDC_MINT, geckoRef);
+    const solPull = await resolvePoolSeries('SOL/USDC', SOL_MINT, USDC_MINT, geckoRef, pinnedSolPool);
     solPool = solPull.pool;
 
     const repo = new CandleRepository(db);
-    tokenCandles = cacheAndReport(repo, symbol, tokenPull.candles, 'geckoterminal');
-    cacheAndReport(repo, 'SOL', solPull.candles, 'geckoterminal');
+    tokenCandles = cacheAndReport(repo, symbol, tokenPull.candles, 'geckoterminal', tokenPool ?? '');
+    cacheAndReport(repo, 'SOL', solPull.candles, 'geckoterminal', solPool ?? '');
 
-    console.log(`\n${symbol}/SOL selected pool: ${tokenPool ?? 'NONE — no pool traded in this window'}`);
-    console.log(`SOL/USDC selected pool: ${solPool ?? 'NONE — no pool traded in this window'}`);
+    console.log(`\n${symbol}/SOL selected pool: ${tokenPool ?? 'NONE — no pool traded in this window'}${tokenPull.pinned ? '  [PINNED — dominance comparison skipped]' : ''}`);
+    console.log(`SOL/USDC selected pool: ${solPool ?? 'NONE — no pool traded in this window'}${solPull.pinned ? '  [PINNED — dominance comparison skipped]' : ''}`);
 
     const wick = computeWickDiagnostics(tokenCandles);
     console.log(`\n${symbol}/SOL wick/ATR diagnostics — the range-widening replacement (DECISIONS §23, §26):`);
@@ -268,6 +314,7 @@ async function runGeckoTerminal(): Promise<void> {
   } finally {
     writeRawSample(rawSamples, {
       symbol, interval, from, to, provider: 'geckoterminal', tokenPool, solPool,
+      tokenPoolPinned: pinnedTokenPool !== null, solPoolPinned: pinnedSolPool !== null,
       parsedRow0: tokenCandles[0] ?? null,
       parsedRow0Iso: tokenCandles[0] === undefined ? null : new Date(tokenCandles[0].timestamp).toISOString(),
     });
@@ -296,8 +343,8 @@ async function runBinance(): Promise<void> {
   report('SOLUSDT', sol.candles, sol.gaps);
 
   const repo = service.repository;
-  console.log(`\nrejected candles  ${symbol}: ${repo.countRejected(symbol, interval)}, ` +
-              `SOL: ${repo.countRejected('SOL', interval)}`);
+  console.log(`\nrejected candles  ${symbol}: ${repo.countRejected(symbol, interval, '')}, ` +
+              `SOL: ${repo.countRejected('SOL', interval, '')}`);
 
   const synth = synthesizeRatioSeries(token.candles, sol.candles);
   const synthIssues = detectSeriesIssues(synth.candles, interval);

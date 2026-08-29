@@ -1,6 +1,17 @@
--- Schema v1. Everything persists: a restart must not lose open position state
+-- Schema v2. Everything persists: a restart must not lose open position state
 -- (spec §3). On-chain amounts are stored as TEXT holding the raw integer
 -- (smallest-unit) value — never as REAL — per spec §2.5.
+--
+-- v1 -> v2 (DECISIONS §29): pool_address added to candles/candle_fetch_log/
+-- candle_gaps/rejected_candles. v1 keyed candles on (token, interval,
+-- timestamp) alone, which cannot represent two different on-chain pools for
+-- the same token/interval — GeckoTerminal pool selection is NOT stable
+-- run-to-run (rate-limit-driven candidate exclusion can hand a re-fetch a
+-- different pool than last time), and v1's upsert would silently overwrite
+-- one pool's validated candles with another's for every overlapping
+-- timestamp. Confirmed happening in normal use, not as a theoretical edge
+-- case. '' (empty string) means "not a pool-based series" — Binance symbols
+-- have no pool address.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -11,55 +22,60 @@ CREATE TABLE IF NOT EXISTS schema_meta (
 );
 
 -- ---------------------------------------------------------------- candles --
--- Keyed by (token, interval, timestamp) so a re-fetch is a no-op and we never
--- re-request what we already hold (spec §4).
+-- Keyed by (token, interval, pool_address, timestamp) so two different pools'
+-- candles for the same token/interval coexist, visibly distinct, rather than
+-- one silently overwriting the other (spec §4, DECISIONS §29).
 CREATE TABLE IF NOT EXISTS candles (
-  token      TEXT    NOT NULL,
-  interval   TEXT    NOT NULL,
-  timestamp  INTEGER NOT NULL,          -- bar OPEN time, epoch ms, UTC-aligned
-  open       REAL    NOT NULL,
-  high       REAL    NOT NULL,
-  low        REAL    NOT NULL,
-  close      REAL    NOT NULL,
-  volume     REAL    NOT NULL,
-  provider   TEXT    NOT NULL,
-  fetched_at INTEGER NOT NULL,
-  PRIMARY KEY (token, interval, timestamp)
+  token        TEXT    NOT NULL,
+  interval     TEXT    NOT NULL,
+  pool_address TEXT    NOT NULL DEFAULT '',  -- '' = not pool-based (e.g. Binance)
+  timestamp    INTEGER NOT NULL,          -- bar OPEN time, epoch ms, UTC-aligned
+  open         REAL    NOT NULL,
+  high         REAL    NOT NULL,
+  low          REAL    NOT NULL,
+  close        REAL    NOT NULL,
+  volume       REAL    NOT NULL,
+  provider     TEXT    NOT NULL,
+  fetched_at   INTEGER NOT NULL,
+  PRIMARY KEY (token, interval, pool_address, timestamp)
 ) WITHOUT ROWID;
 
-CREATE INDEX IF NOT EXISTS idx_candles_lookup ON candles (token, interval, timestamp);
+CREATE INDEX IF NOT EXISTS idx_candles_lookup ON candles (token, interval, pool_address, timestamp);
 
 -- Ranges we have actually queried, so an empty result is distinguishable from
 -- "never fetched". Birdeye omits empty candles entirely, so absence of a row
 -- is NOT evidence of absence of data (spec §4).
 CREATE TABLE IF NOT EXISTS candle_fetch_log (
-  token      TEXT    NOT NULL,
-  interval   TEXT    NOT NULL,
-  from_ts    INTEGER NOT NULL,
-  to_ts      INTEGER NOT NULL,
-  provider   TEXT    NOT NULL,
-  fetched_at INTEGER NOT NULL,
-  row_count  INTEGER NOT NULL
+  token        TEXT    NOT NULL,
+  interval     TEXT    NOT NULL,
+  pool_address TEXT    NOT NULL DEFAULT '',
+  from_ts      INTEGER NOT NULL,
+  to_ts        INTEGER NOT NULL,
+  provider     TEXT    NOT NULL,
+  fetched_at   INTEGER NOT NULL,
+  row_count    INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS candle_gaps (
   token           TEXT    NOT NULL,
   interval        TEXT    NOT NULL,
+  pool_address    TEXT    NOT NULL DEFAULT '',
   after_ts        INTEGER NOT NULL,
   before_ts       INTEGER NOT NULL,
   missing_bars    INTEGER NOT NULL,
   detected_at     INTEGER NOT NULL,
-  PRIMARY KEY (token, interval, after_ts)
+  PRIMARY KEY (token, interval, pool_address, after_ts)
 ) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS rejected_candles (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  token      TEXT    NOT NULL,
-  interval   TEXT    NOT NULL,
-  timestamp  INTEGER NOT NULL,
-  reason     TEXT    NOT NULL,
-  payload    TEXT    NOT NULL,
-  rejected_at INTEGER NOT NULL
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  token        TEXT    NOT NULL,
+  interval     TEXT    NOT NULL,
+  pool_address TEXT    NOT NULL DEFAULT '',
+  timestamp    INTEGER NOT NULL,
+  reason       TEXT    NOT NULL,
+  payload      TEXT    NOT NULL,
+  rejected_at  INTEGER NOT NULL
 );
 
 -- -------------------------------------------------------------- positions --

@@ -911,3 +911,55 @@ path is the only reliable protection today. `fetch-data.ts`'s printed pool
 address per run is the only way to notice this happened after the fact —
 compare it against the previous run's printed selection before trusting a
 re-fetch's data.
+
+## 30. Pool pinning, and the cache key actually fixed
+
+**§29 documented the contamination and deliberately did not fix it** (schema
+migration "not otherwise asked for"). The operator asked for both fixes
+after seeing it happen in normal use, not as a hypothetical:
+
+**Cache key (schema v2):** `candles`' primary key is now `(token, interval,
+pool_address, timestamp)`, not `(token, interval, timestamp)`. Two different
+pools' candles for the same token/interval now coexist as separate rows,
+visibly distinct, instead of one upsert silently overwriting the other.
+`candle_fetch_log`, `candle_gaps` and `rejected_candles` got the same column
+for consistency, since leaving them behind would just relocate the same
+class of bug one table over. `pool_address = ''` means "not a pool-based
+series" — Binance's `CandleService` path (exchange symbols, no pools) uses it
+throughout. Every `CandleRepository` method that touches these tables now
+takes `poolAddress` as a REQUIRED parameter, not optional-with-a-default —
+forcing every caller to say which series it means, rather than letting an
+omission silently resolve to one. This is a real, non-backward-compatible
+schema change: `SCHEMA_VERSION` bumped 1 → 2, and `openDb` already refuses to
+open a v1 database against v2 code with a clear error rather than risk silent
+corruption — no migration path was written for existing v1 databases, since
+`data/` is explicitly disposable, regenerated-at-runtime state (CLAUDE.md),
+not data worth preserving across a schema change.
+
+**Pool pinning (root-cause fix, not a workaround):** `--pool-address
+<addr>` and `--sol-pool-address <addr>` skip GeckoTerminal pool
+discovery/dominance-comparison entirely for that run's token or SOL
+reference series, fetching the named pool's OHLCV directly. Reproducibly,
+without a flag to remember: `tokens[].pinnedPoolAddress` (per token) and
+`global.solReferencePoolAddress` (shared — one reference series, not one per
+token) in config, with the CLI flag winning when both are given. This is
+the actual fix for §29's root cause — rate-limit-driven candidate exclusion
+handing a re-fetch a different pool than last time — because pinning removes
+candidate discovery and comparison from the request path altogether, not
+just the risk of a bad outcome from it.
+
+**The tradeoff, made explicit, not hidden:** a pinned run cannot detect
+whether dominance migrated to a different pool during the window, because no
+comparison is made — `fetch-data.ts` prints `PINNED — pool discovery and
+dominance comparison SKIPPED` prominently for each pinned series, and the
+raw-sample metadata records `tokenPoolPinned`/`solPoolPinned` so this is
+never a silent simplification.
+
+**config/default.yaml pins JUP to `C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg`**
+(the meteora pool validated across every real-data review so far, §24-§27)
+and the SOL reference to `Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE`
+(Orca's SOL/USDC pool, ~$25M reserve) — the two pools this project has
+actual confidence in, chosen specifically to test whether pinning is what
+makes a 179-day fetch achievable under the free tier's rate limit (§29's
+179-day attempt lost 5 of JUP/SOL's 6 candidates to rate-limit attrition
+before pinning existed).

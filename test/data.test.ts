@@ -123,73 +123,103 @@ describe('candle repository', () => {
     const db = openDb(':memory:');
     return { db, repo: new CandleRepository(db) };
   };
+  const POOL_A = 'poolA';
+  const POOL_B = 'poolB';
 
   it('stores and reads back a range', () => {
     const { db, repo } = setup();
-    repo.upsertCandles('JUP', '1h', [bar(0), bar(1), bar(2)], 'test');
-    expect(repo.getCandles('JUP', '1h', T0, T0 + 2 * H)).toHaveLength(3);
-    expect(repo.getCandles('JUP', '1h', T0 + H, T0 + H)).toHaveLength(1);
+    repo.upsertCandles('JUP', '1h', [bar(0), bar(1), bar(2)], 'test', POOL_A);
+    expect(repo.getCandles('JUP', '1h', T0, T0 + 2 * H, POOL_A)).toHaveLength(3);
+    expect(repo.getCandles('JUP', '1h', T0 + H, T0 + H, POOL_A)).toHaveLength(1);
     db.close();
   });
 
-  it('is idempotent on re-insert — no duplicate rows', () => {
+  it('is idempotent on re-insert to the SAME pool — no duplicate rows', () => {
     const { db, repo } = setup();
-    repo.upsertCandles('JUP', '1h', [bar(0)], 'test');
-    repo.upsertCandles('JUP', '1h', [bar(0, { close: 99 })], 'test2');
-    const rows = repo.getCandles('JUP', '1h', T0, T0);
+    repo.upsertCandles('JUP', '1h', [bar(0)], 'test', POOL_A);
+    repo.upsertCandles('JUP', '1h', [bar(0, { close: 99 })], 'test2', POOL_A);
+    const rows = repo.getCandles('JUP', '1h', T0, T0, POOL_A);
     expect(rows).toHaveLength(1);
-    expect(rows[0]!.close).toBe(99);         // latest write wins
+    expect(rows[0]!.close).toBe(99);         // latest write wins WITHIN a pool
+    db.close();
+  });
+
+  it('DECISIONS §29: two different pools coexist visibly rather than one overwriting the other', () => {
+    const { db, repo } = setup();
+    repo.upsertCandles('JUP', '1h', [bar(0, { close: 1 })], 'test', POOL_A);
+    repo.upsertCandles('JUP', '1h', [bar(0, { close: 2 })], 'test', POOL_B);
+    // Same token, interval AND timestamp — only pool_address differs. Both survive.
+    expect(repo.getCandles('JUP', '1h', T0, T0, POOL_A)[0]!.close).toBe(1);
+    expect(repo.getCandles('JUP', '1h', T0, T0, POOL_B)[0]!.close).toBe(2);
+    db.close();
+  });
+
+  it('lists every cached pool for a token/interval, most recently fetched first', () => {
+    const { db, repo } = setup();
+    repo.upsertCandles('JUP', '1h', [bar(0)], 'test', POOL_A);
+    repo.upsertCandles('JUP', '1h', [bar(0)], 'test', POOL_B);
+    const pools = repo.cachedPools('JUP', '1h').map((p) => p.poolAddress).sort();
+    expect(pools).toEqual([POOL_A, POOL_B].sort());
     db.close();
   });
 
   it('keeps tokens and intervals separate', () => {
     const { db, repo } = setup();
-    repo.upsertCandles('JUP', '1h', [bar(0)], 'test');
-    repo.upsertCandles('SOL', '1h', [bar(0)], 'test');
-    repo.upsertCandles('JUP', '4h', [bar(0)], 'test');
-    expect(repo.getCandles('JUP', '1h', T0, T0)).toHaveLength(1);
-    expect(repo.getCandles('SOL', '1h', T0, T0)).toHaveLength(1);
+    repo.upsertCandles('JUP', '1h', [bar(0)], 'test', POOL_A);
+    repo.upsertCandles('SOL', '1h', [bar(0)], 'test', POOL_A);
+    repo.upsertCandles('JUP', '4h', [bar(0)], 'test', POOL_A);
+    expect(repo.getCandles('JUP', '1h', T0, T0, POOL_A)).toHaveLength(1);
+    expect(repo.getCandles('SOL', '1h', T0, T0, POOL_A)).toHaveLength(1);
     db.close();
   });
 
   it('reports the whole window as missing before any fetch', () => {
     const { db, repo } = setup();
-    const missing = repo.missingRanges('JUP', '1h', T0, T0 + 10 * H);
+    const missing = repo.missingRanges('JUP', '1h', T0, T0 + 10 * H, POOL_A);
     expect(missing).toEqual([{ from: T0, to: T0 + 10 * H }]);
     db.close();
   });
 
   it('reports nothing missing once the window has been fetched', () => {
     const { db, repo } = setup();
-    repo.recordFetch('JUP', '1h', T0, T0 + 10 * H, 'test', 11);
-    expect(repo.missingRanges('JUP', '1h', T0, T0 + 10 * H)).toHaveLength(0);
+    repo.recordFetch('JUP', '1h', T0, T0 + 10 * H, 'test', 11, POOL_A);
+    expect(repo.missingRanges('JUP', '1h', T0, T0 + 10 * H, POOL_A)).toHaveLength(0);
     db.close();
   });
 
   it('reports only the uncovered remainder — so nothing is re-fetched', () => {
     const { db, repo } = setup();
-    repo.recordFetch('JUP', '1h', T0, T0 + 5 * H, 'test', 6);
-    const missing = repo.missingRanges('JUP', '1h', T0, T0 + 10 * H);
+    repo.recordFetch('JUP', '1h', T0, T0 + 5 * H, 'test', 6, POOL_A);
+    const missing = repo.missingRanges('JUP', '1h', T0, T0 + 10 * H, POOL_A);
     expect(missing).toEqual([{ from: T0 + 6 * H, to: T0 + 10 * H }]);
     db.close();
   });
 
   it('finds a hole between two fetched ranges', () => {
     const { db, repo } = setup();
-    repo.recordFetch('JUP', '1h', T0, T0 + 2 * H, 'test', 3);
-    repo.recordFetch('JUP', '1h', T0 + 8 * H, T0 + 10 * H, 'test', 3);
-    const missing = repo.missingRanges('JUP', '1h', T0, T0 + 10 * H);
+    repo.recordFetch('JUP', '1h', T0, T0 + 2 * H, 'test', 3, POOL_A);
+    repo.recordFetch('JUP', '1h', T0 + 8 * H, T0 + 10 * H, 'test', 3, POOL_A);
+    const missing = repo.missingRanges('JUP', '1h', T0, T0 + 10 * H, POOL_A);
     expect(missing).toEqual([{ from: T0 + 3 * H, to: T0 + 7 * H }]);
     db.close();
   });
 
-  it('persists gaps and rejected candles for later inspection', () => {
+  it('missingRanges is per-pool — a different pool has not fetched anything', () => {
     const { db, repo } = setup();
-    repo.recordGaps('JUP', '1h', detectGaps([bar(0), bar(4)], '1h'));
-    expect(repo.getGaps('JUP', '1h')).toHaveLength(1);
+    repo.recordFetch('JUP', '1h', T0, T0 + 10 * H, 'test', 11, POOL_A);
+    expect(repo.missingRanges('JUP', '1h', T0, T0 + 10 * H, POOL_B)).toEqual([{ from: T0, to: T0 + 10 * H }]);
+    db.close();
+  });
+
+  it('persists gaps and rejected candles for later inspection, per pool', () => {
+    const { db, repo } = setup();
+    repo.recordGaps('JUP', '1h', detectGaps([bar(0), bar(4)], '1h'), POOL_A);
+    expect(repo.getGaps('JUP', '1h', POOL_A)).toHaveLength(1);
+    expect(repo.getGaps('JUP', '1h', POOL_B)).toHaveLength(0);
     const { rejected } = validateCandles([bar(0, { volume: -1 })], '1h');
-    repo.recordRejected('JUP', '1h', rejected);
-    expect(repo.countRejected('JUP', '1h')).toBe(1);
+    repo.recordRejected('JUP', '1h', rejected, POOL_A);
+    expect(repo.countRejected('JUP', '1h', POOL_A)).toBe(1);
+    expect(repo.countRejected('JUP', '1h', POOL_B)).toBe(0);
     db.close();
   });
 });
