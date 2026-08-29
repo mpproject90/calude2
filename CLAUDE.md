@@ -1,7 +1,15 @@
 # Working on this repository
 
-A Solana RSI/MFI mean-reversion trading bot. **Read these before doing anything
-else:**
+A Solana trading bot. **Phase 1's RSI/MFI mean-reversion ENTRY hypothesis was
+tested exhaustively and REJECTED** (DECISIONS §27–§38, summarized prominently
+near the top of both DECISIONS.md and STATUS.md — read that first, not this
+paragraph). The project is now pivoting to **manual entry, automated exit**:
+the operator picks the token and a limit price; the bot fills it and manages
+the exit (take-profit ladder, trailing stop, hard stop, time exit) with no
+indicator-driven entry logic. The indicator/filter/funnel/backtest code from
+phase 1 is preserved, not deleted — it produced a real, trustworthy negative
+result and may be reused for a different hypothesis later. **Read these
+before doing anything else:**
 
 1. **`docs/STATUS.md`** — what is built, what is outstanding, what is unverified,
    and what the next action is. Start here.
@@ -10,17 +18,21 @@ else:**
 3. **`docs/SPEC.md`** — the original requirements. Where the code diverges,
    DECISIONS is authoritative and records why.
 
-## STOP — step 7, do not react to the backtest result without direction
+## STOP — phase 2 pivot scope is pending operator confirmation
 
-Step 6 (the backtest engine) is built and has run once against real data —
-result: zero trades, for a documented data-density reason (DECISIONS §27),
-not a strategy verdict. **The next action is not yours.** Do not tune
-parameters, change the interval, try a different pool, or otherwise react to
-this result. Do not start phase 2 (paper trading). `docs/STATUS.md` has the
-full numbers under "First real backtest run."
+Phase 1 is concluded: the RSI/MFI entry hypothesis is rejected on real data
+(DECISIONS §27–§38). The operator has stated the phase 2 direction (manual
+limit-price entry, automated multi-tranche exit) but the detailed scope was
+reported back for confirmation before implementation started. **If the
+scope has not been explicitly confirmed in the current conversation, do not
+start building the pivot** — report the proposed scope and wait, the same
+discipline this project has used at every phase gate so far.
 
-If asked to continue and the operator hasn't reviewed the backtest result yet,
-say so rather than proceeding.
+Once confirmed: don't rebuild or re-litigate the RSI/MFI mean-reversion
+entry hypothesis — it was tested thoroughly and rejected, not abandoned
+half-finished. Reuse the preserved indicator/filter/backtest code only if a
+genuinely new hypothesis calls for it, and say so explicitly in DECISIONS if
+it happens.
 
 ## Hard rules
 

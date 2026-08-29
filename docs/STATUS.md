@@ -5,35 +5,90 @@ conversation history, this tells you where the project stands and what happens
 next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
-**Last updated:** still phase 1 step 7 (STOP — awaiting operator review).
-The sample-size blocker from the GeckoTerminal-only path is solved (§33-§34:
-years of Binance-derived history, 356 pooled cross-ups), the resulting
-clustering was quantified and corrected for (§35: 137 effective at a 2-day
-decluster window), a baseline backtest ran on that pooled series at current
-settings (§36: 10 raw / 7 effective trades, far below the 50-trade
-minimum), and diagnostics isolated cost from entry/exit quality (§37: MFE
-was real but the exit apparatus didn't capture it) and then tested whether
-ANY reasonable exit fixes that (§38): **replayed the same 10 entries under
-5 exit rules — every alternative exit improved on control, but NONE
-crossed into positive expectancy, costed or zero-cost. Per the operator's
-own decision rule, this is decisive: the entry has no edge on this
-sample.** See "Cost/exit diagnostics" below. No parameters have been tuned
-anywhere in this project yet. Verified against `main` by clean clone and
-tree-versus-index diff after every push.
+**Last updated:** Phase 1 is CONCLUDED — see the prominent section
+immediately below. The project is now pivoting to phase 2 with a new
+design (manual entry, automated exit); the detailed scope is reported in
+"PHASE 2 PIVOT" further down, pending operator confirmation before any of
+it is built.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
 
 ---
 
-## THE NEXT ACTION IS NOT THE ASSISTANT'S
+## PHASE 1 CONCLUDED (2026-08-29): RSI/MFI mean-reversion ENTRY — REJECTED
 
-**Step 7 (spec §15): STOP — report backtest results, await operator review.**
-Step 6 is built and has run once against real data. The result was **zero
-trades**, for a specific, documented reason — not a verdict on the strategy
-(DECISIONS §27, "First real backtest run" below). **Do not tune parameters,
-change the interval, pick a different pool, or otherwise react to this result
-without the operator's direction. Do not start phase 2 (paper trading).**
+**Read this before anything else in this file.** Full reasoning in
+`DECISIONS.md`'s own top section (same title) and §27–§38.
+
+- **Tested**: RSI(14)/MFI(14) mean-reversion entry — prior overbought,
+  RSI cross-up through 30, MFI confirm, relative-strength vs SOL, SOL
+  regime filter — with the full exit stack (stop-loss, time exit,
+  RSI-recovery, optional trailing).
+- **Data**: 5 years combined, 7 liquid Solana tokens (JUP, JTO, PYTH, WIF,
+  BONK, RAY, ORCA) vs SOL, hourly, Binance-derived history (a scoped
+  exception to DECISIONS §6 — close is exact under ratio synthesis).
+- **Funnel**: 356 pooled RSI cross-ups → 137 effective after declustering
+  cross-token correlation → 10 raw / 7 effective actual trades.
+- **Baseline expectancy**: -0.0406 SOL costed, **-0.0269 SOL with every
+  cost removed — still negative.**
+- **Best of 4 alternative exits** (2 trailing-stop configs, 2 fixed
+  take-profit levels), replayed on the SAME 10 entries: **-0.0081 SOL
+  zero-cost — still negative. 0 of 4 crossed zero.**
+- **The exit was genuinely miscalibrated and fixing it helped substantially
+  — but there was no edge underneath it to capture. Rejected.**
+
+**Caveat, not a hedge**: N=7 effective is a small sample. This is one
+hypothesis on one asset class at one parameterization — not a claim mean
+reversion never works anywhere.
+
+**Preserved, not deleted**: `src/indicators/`, `src/filters/`,
+`src/backtest/funnel.ts`, `src/backtest/engine.ts` all stay — real,
+tested apparatus that produced a trustworthy negative result and may be
+reused for a different hypothesis later. Removed from the live/paper
+ENTRY path only, once the pivot below is built.
+
+## PHASE 2 PIVOT — scope reported, awaiting operator confirmation (not yet built)
+
+**New shape: manual entry, automated exit.** The operator pastes a
+contract address and sets a limit buy price; the bot fills it and manages
+the exit automatically. No indicator-driven entry. Judgment on token and
+entry price stays with the operator; the bot supplies execution
+discipline. Reported scope, nothing below is built yet:
+
+- **Entry**: per-token config with a target limit price and an amount.
+  Poll price; buy when it reaches or crosses the limit. The position-size
+  cap against pool liquidity and the cost-floor check both still apply.
+  Pool resolution and pinning (DECISIONS §29/§30) stay as-is.
+- **Exit**: configurable take-profit ladder (sell X% at +N%, further
+  tranches at higher levels), trailing stop after the first tranche, hard
+  stop-loss, time exit — reusing the existing exit primitives
+  (`rules/exit.ts`), wired to a price-triggered position instead of an
+  indicator-triggered one.
+- **Removed from the live path, not deleted from the codebase**:
+  prior-overbought, RSI cross-up, MFI confirmation, relative-strength,
+  regime filter. Indicators/filters/funnel/backtest engine all stay
+  intact and tested.
+- **New, not yet built anywhere**: expected round-trip cost PER TRANCHE,
+  shown at config-validation time — three tranches means three exits,
+  each paying DEX fee + priority fee + slippage, and costs were 44% of
+  gross P&L in the phase-1 backtest (DECISIONS §36). A tranche whose
+  expected proceeds don't clear its own cost by a sensible margin should
+  be rejected at config validation with the numbers shown, not discovered
+  after the fact.
+- **Then phase 2 proper (spec step 8)**: paper trading, same code path as
+  live with execution swapped for a simulator with modelled slippage.
+  Purpose is different from phase 1's backtesting — this validates the
+  EXECUTION LAYER (does the stop fire at the right price, does position
+  state stay consistent, does the price feed hold up over weeks, does a
+  simulated failure get handled), not a strategy.
+- **Not built yet, and gated on explicit operator approval**: the live
+  execution layer (spec step 10), after paper trading runs and is
+  reviewed. Same hard rule as always — nothing here may place a real trade
+  yet.
+
+**Awaiting operator confirmation of this scope before any of it is
+built.**
 
 ### Commands the operator runs (locally)
 

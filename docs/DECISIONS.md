@@ -17,6 +17,75 @@ new entry records the reversal and why.
 
 ---
 
+## PHASE 1 CONCLUSION (2026-08-29): RSI/MFI mean-reversion ENTRY — REJECTED
+
+**Read this before anything else in this file.** §1 below describes the
+original scope; it is superseded by this finding, not deleted (append-only
+convention). A fresh session should see this immediately and NOT rebuild or
+re-litigate the same hypothesis — it was tested thoroughly, not abandoned
+half-finished.
+
+**What was tested**: an entry requiring, in order — RSI(14) previously
+overbought (>70) within a lookback window, then RSI crossing back up
+through 30, confirmed by MFI(14) < 30, confirmed by the token
+underperforming SOL by ≥5% over a lookback, confirmed by SOL's own regime
+(above its 50-period 4h moving average). Exit: hard stop-loss, time exit,
+RSI-recovery to 70, or an optional trailing stop.
+
+**Over what data**: 5 years combined, 7 liquid Solana tokens (JUP, JTO,
+PYTH, WIF, BONK, RAY, ORCA) against SOL, hourly, sourced from Binance's
+bulk historical archives — a scoped, explicitly-reasoned exception to §6's
+rejection of USDT-ratio synthesis (close is exact under ratio synthesis;
+only high/low are approximate bounds, and RSI is built from close alone —
+§33). The 180-day GeckoTerminal free-tier ceiling made this depth
+otherwise unreachable (§29).
+
+**The funnel of evidence, each stage a harder test than the last:**
+
+| Stage | Count |
+|---|---|
+| RSI cross-ups through 30, pooled across all 7 tokens | 356 |
+| ...declustered for cross-token correlation (2-day window, §35) | 137 effective |
+| Actual trades the strategy produced at current settings | 10 raw / 7 effective |
+| Baseline expectancy, real on-chain costs (§36) | -0.0406 SOL |
+| Expectancy with EVERY cost removed — DEX fee, priority fee, slippage (§37) | **-0.0269 SOL — still negative** |
+| Best of 4 alternative exits (trailing-stop ×2, fixed take-profit ×2), replayed on the SAME 10 entries, zero-cost (§38) | **-0.0081 SOL — still negative, 0 of 4 crossed zero** |
+
+**The exit was genuinely miscalibrated** — the original exit captured
+almost none of the real favorable price movement that did occur (average
+MFE 5.93% on time-exited trades, zero RSI-recovery exits in 10 tries) —
+**and fixing it materially helped** (every alternative exit roughly halved
+the loss or better). **But it was not enough. There was no edge underneath
+the exit to capture.** Rejected.
+
+**Caveat, stated because it matters, not as a hedge**: N=7 effective
+declustered trades is a small sample. This is ONE entry hypothesis
+(RSI/MFI mean-reversion with this specific conjunction of conditions)
+tested on ONE asset class (liquid Solana tokens, ~2021–2026) at ONE
+parameterization (period 14, conventional 30/70 thresholds). It is not a
+claim that mean reversion never works, anywhere, under any configuration —
+it is a claim that THIS hypothesis, tested this thoroughly with this much
+real data, did not clear the bar.
+
+**What happens as a result**: the project pivots to a manual-entry,
+automated-exit design — the operator picks the token and a limit price;
+the bot fills it and manages a configurable take-profit ladder, trailing
+stop, hard stop, and time exit, with no indicator-driven entry. See
+`docs/STATUS.md`'s "PHASE 2 PIVOT" section for the current scope. **The
+indicator, filter, funnel and backtest code (`src/indicators/`,
+`src/filters/`, `src/backtest/funnel.ts`, `src/backtest/engine.ts`) is
+PRESERVED, not deleted** — it produced this real, trustworthy negative
+result through careful measurement and may be reused for a different
+hypothesis later. It will be removed from the live/paper ENTRY path only,
+once the pivot's scope is confirmed and built — a later DECISIONS entry
+will record that removal — not from the codebase.
+
+Full derivation: §27 (engine build + first 0-trade result) through §38
+(exit-variant replay). Nothing above should be re-derived from scratch —
+read those sections for the "why," not just the numbers here.
+
+---
+
 ## 1. Scope: what this bot is and is not
 
 A **mean-reversion** bot for liquid Solana tokens. It buys oversold conditions
