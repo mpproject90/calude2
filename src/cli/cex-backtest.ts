@@ -128,6 +128,7 @@ async function main(): Promise<void> {
 
   const allTrades: ClosedBacktestTrade[] = [];
   const tradeSymbol = new Map<ClosedBacktestTrade, string>();
+  const pooledRejections: Record<string, number> = {};
 
   for (const symbol of symbols) {
     const candles = repo.getCandles(symbol, interval, wideOpen.from, wideOpen.to, '');
@@ -150,8 +151,17 @@ async function main(): Promise<void> {
     });
     for (const t of result.trades) tradeSymbol.set(t, symbol);
     allTrades.push(...result.trades);
+    const rejByFilter: Record<string, number> = {};
+    for (const r of result.rejectedSignals) {
+      rejByFilter[r.blockedBy] = (rejByFilter[r.blockedBy] ?? 0) + 1;
+      pooledRejections[r.blockedBy] = (pooledRejections[r.blockedBy] ?? 0) + 1;
+    }
 
     console.log(`--- ${symbol} ---`);
+    console.log(
+      `  entry evaluations ${result.entryEvaluations}, rejected: ` +
+      Object.entries(rejByFilter).sort(([, a], [, b]) => b - a).map(([k, v]) => `${k}=${v}`).join(', '),
+    );
     printSample(symbol, computeSampleMetrics(result.trades, cfg.global.minTradesForConclusion));
   }
   db.close();
@@ -164,6 +174,10 @@ async function main(): Promise<void> {
   const effectiveClusters = decluster(declusterEvents, DECLUSTER_WINDOW_DAYS * 86_400_000);
 
   console.log('\n=== POOLED (all 7 tokens, current settings, full history) ===');
+  console.log(
+    '  pooled rejections by filter: ' +
+    Object.entries(pooledRejections).sort(([, a], [, b]) => b - a).map(([k, v]) => `${k}=${v}`).join(', '),
+  );
   printSample('POOLED', pooledMetrics, effectiveClusters.length);
 
   console.log(
