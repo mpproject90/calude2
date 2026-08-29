@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import type { Candle } from '../src/types/index.js';
 import { aggregateCandles, AggregateError } from '../src/data/aggregate.js';
 import { regimeBucketIndices } from '../src/backtest/regimeAlignment.js';
-import { runBacktest } from '../src/backtest/engine.js';
+import { runBacktest, type ClosedBacktestTrade } from '../src/backtest/engine.js';
+import { computeSampleMetrics, computeBacktestMetrics } from '../src/backtest/metrics.js';
 import { parseConfig } from '../src/config/load.js';
 import type { Config, TokenConfig } from '../src/config/schema.js';
 import { computeRsi } from '../src/indicators/rsi.js';
@@ -284,5 +285,118 @@ describe('backtest engine', () => {
     });
     expect(result.trades).toHaveLength(0);
     expect(result.rejectedSignals.some((r) => r.blockedBy === 'filter:regime')).toBe(true);
+  });
+});
+
+const flatCost = { dexFeePct: 0, slippagePct: 0, fixedFeePct: 0, roundTripPct: 0, slippageEstimated: true };
+
+function trade(over: Partial<ClosedBacktestTrade> = {}): ClosedBacktestTrade {
+  return {
+    entryIndex: 0, entryTimestamp: T0, entryPrice: 100,
+    exitIndex: 1, exitTimestamp: T0 + H, exitPrice: 100,
+    exitReason: 'time', barsHeld: 1,
+    sizeSol: sol('1'), grossPnlSol: sol('0'), costsSol: sol('0'), netPnlSol: sol('0'),
+    mfePct: 0, costBreakdown: flatCost, entryChecks: [],
+    ...over,
+  };
+}
+
+function netTrade(net: number): ClosedBacktestTrade {
+  return trade({ netPnlSol: sol(net.toString()), grossPnlSol: sol(net.toString()) });
+}
+
+describe('backtest metrics', () => {
+  it('computes win rate, avg win/loss, profit factor and expectancy exactly', () => {
+    const trades = [2, 4, -1, -3, 2].map(netTrade);
+    const m = computeSampleMetrics(trades, 50);
+    expect(m.winRate).toBeCloseTo(0.6, 10);
+    expect(m.avgWinSol).toBeCloseTo(8 / 3, 10);
+    expect(m.avgLossSol).toBeCloseTo(2, 10);
+    expect(m.profitFactor).toBeCloseTo(2, 10);
+    expect(m.expectancySol).toBeCloseTo(0.6 * (8 / 3) - 0.4 * 2, 10);
+  });
+
+  it('reports Infinity profit factor with wins and no losses, and 0 expectancy risk with no wins', () => {
+    expect(computeSampleMetrics([1, 2].map(netTrade), 50).profitFactor).toBe(Infinity);
+    expect(computeSampleMetrics([], 50).profitFactor).toBe(0);
+    const allLosses = computeSampleMetrics([-1, -2].map(netTrade), 50);
+    expect(allLosses.profitFactor).toBe(0);
+    expect(allLosses.winRate).toBe(0);
+  });
+
+  it('computes max drawdown from the cumulative net P&L curve', () => {
+    const trades = [5, -2, -3, 4, -1].map(netTrade);
+    // cumulative: 5, 3, 0, 4, 3 — peak 5 throughout, worst drawdown at cum=0 -> 5
+    expect(computeSampleMetrics(trades, 50).maxDrawdownSol).toBeCloseTo(5, 10);
+  });
+
+  it('finds the longest losing streak, not just the total loss count', () => {
+    const trades = [-1, -1, 2, -1, -1, -1, 2].map(netTrade);
+    expect(computeSampleMetrics(trades, 50).longestLosingStreak).toBe(3);
+  });
+
+  it('breaks down exit triggers by reason with count and average net P&L', () => {
+    const trades = [
+      trade({ exitReason: 'stop_loss', netPnlSol: sol('-1') }),
+      trade({ exitReason: 'stop_loss', netPnlSol: sol('-3') }),
+      trade({ exitReason: 'rsi_recovery', netPnlSol: sol('2') }),
+    ];
+    const m = computeSampleMetrics(trades, 50);
+    const stopStat = m.exitTriggerBreakdown.find((s) => s.reason === 'stop_loss')!;
+    expect(stopStat.count).toBe(2);
+    expect(stopStat.avgNetPnlSol).toBeCloseTo(-2, 10);
+    const rsiStat = m.exitTriggerBreakdown.find((s) => s.reason === 'rsi_recovery')!;
+    expect(rsiStat.count).toBe(1);
+    expect(rsiStat.avgNetPnlSol).toBeCloseTo(2, 10);
+  });
+
+  it('computes the MFE distribution across all trades, win or lose', () => {
+    const trades = Array.from({ length: 10 }, (_, i) => trade({ mfePct: i + 1 }));   // 1..10
+    const m = computeSampleMetrics(trades, 50);
+    expect(m.mfeDistributionPct.p25).toBe(3);
+    expect(m.mfeDistributionPct.p50).toBe(6);
+    expect(m.mfeDistributionPct.p75).toBe(8);
+    expect(m.mfeDistributionPct.p90).toBe(10);
+    expect(m.mfeDistributionPct.max).toBe(10);
+  });
+
+  it('reports total costs as a percentage of total absolute gross P&L', () => {
+    const trades = [
+      trade({ grossPnlSol: sol('10'), costsSol: sol('1') }),
+      trade({ grossPnlSol: sol('-5'), costsSol: sol('1') }),
+    ];
+    const m = computeSampleMetrics(trades, 50);
+    expect(m.costs.totalCostsSol).toBeCloseTo(2, 10);
+    expect(m.costs.totalGrossPnlSol).toBeCloseTo(5, 10);
+    expect(m.costs.costsAsPctOfGrossAbs).toBeCloseTo((2 / 15) * 100, 10);
+  });
+
+  it('flags below the minimum trade count for a conclusive result', () => {
+    expect(computeSampleMetrics([1, 2].map(netTrade), 50).belowMinimumSampleSize).toBe(true);
+    expect(computeSampleMetrics(new Array(50).fill(0).map(() => netTrade(1)), 50).belowMinimumSampleSize).toBe(false);
+  });
+
+  it('splits chronologically into in-sample and out-of-sample, never re-sorting', () => {
+    const trades = Array.from({ length: 10 }, (_, i) => trade({ entryTimestamp: T0 + i * H, entryIndex: i }));
+    const m = computeBacktestMetrics(trades, [], 50, 0.3);
+    expect(m.inSample.tradeCount).toBe(7);
+    expect(m.outOfSample.tradeCount).toBe(3);
+    expect(m.outOfSampleSplitTimestamp).toBe(T0 + 7 * H);
+  });
+
+  it('reports null for the split timestamp when there are no trades at all', () => {
+    const m = computeBacktestMetrics([], [], 50, 0.3);
+    expect(m.outOfSampleSplitTimestamp).toBeNull();
+    expect(m.inSample.tradeCount).toBe(0);
+  });
+
+  it('tallies rejected signals by which check blocked them', () => {
+    const rejected = [
+      { blockedBy: 'indicators-reliable' }, { blockedBy: 'indicators-reliable' },
+      { blockedBy: 'filter:regime' },
+    ];
+    const m = computeBacktestMetrics([], rejected, 50, 0.3);
+    expect(m.rejectedByFilter['indicators-reliable']).toBe(2);
+    expect(m.rejectedByFilter['filter:regime']).toBe(1);
   });
 });
