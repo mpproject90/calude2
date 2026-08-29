@@ -259,6 +259,28 @@ async function main(): Promise<void> {
   const byToken = new Map<string, number>();
   for (const e of pooled) byToken.set(e.symbol, (byToken.get(e.symbol) ?? 0) + 1);
   console.log('events by token:', [...byToken.entries()].map(([s, n]) => `${s}=${n}`).join(', '));
+
+  const daysSorted = [...byDay.entries()].sort(([, a], [, b]) => b.length - a.length);
+  const multiEventDays = daysSorted.filter(([, evs]) => evs.length > 1);
+  const eventsOnMultiDays = multiEventDays.reduce((n, [, evs]) => n + evs.length, 0);
+  console.log(
+    `days with MORE THAN ONE cross-up event: ${multiEventDays.length} ` +
+    `(accounting for ${eventsOnMultiDays}/${pooled.length} events, ${pct(eventsOnMultiDays / pooled.length)})`,
+  );
+  if (daysSorted.length > 0) {
+    const top10 = daysSorted.slice(0, 10).reduce((s, [, evs]) => s + evs.length, 0);
+    console.log(`top 10 busiest days account for ${top10}/${pooled.length} events (${pct(top10 / pooled.length)})`);
+    console.log('busiest days:');
+    for (const [day, evs] of daysSorted.slice(0, 10)) {
+      console.log(`  ${day} (${evs.length}): ${evs.map((e) => e.symbol).join(', ')}`);
+    }
+  }
+  console.log(
+    `\n  ${pooled.length} events on ${byDay.size} distinct days: the effective independent sample for\n` +
+    `  judging expectancy is bounded above by the distinct-day count, not the raw event count, to the\n` +
+    '  extent multiple tokens fire on the same day for the same reason (a shared SOL move). The busiest-\n' +
+    '  days list above is what to check before trusting any per-trade statistic computed from this pool.',
+  );
 }
 
 main().catch((err: unknown) => {

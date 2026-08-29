@@ -6,15 +6,17 @@ next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
 **Last updated:** still phase 1 step 7 (STOP — awaiting operator review), but
-a lot has been measured since the 90-day 0-trade result. Engine validated
-against a gap-free control, the gap-shadow window recalibrated (§28), a real
-cache-contamination bug found and fixed with pool pinning + a schema
-migration (§29–§30), a 179-day pinned run still found only 2 near-misses and
-cleared MFI's calibration (§31), and — most recently — a cheap multi-token
-`data:screen` mode was built and run against 6 real Solana tokens to test
-whether pooling tokens gives a usable sample without waiting on more
-calendar time (§32, "Multi-token screen" below). Verified against `main` by
-clean clone and tree-versus-index diff after every push.
+the sample-size blocker from the GeckoTerminal-only path is now solved.
+Engine validated against a gap-free control, the gap-shadow window
+recalibrated (§28), a real cache-contamination bug found and fixed with pool
+pinning + a schema migration (§29–§30), a 179-day pinned run still found
+only 2 near-misses and cleared MFI's calibration (§31), a 6-token
+`data:screen` pooled only 6 cross-ups — still too thin (§32) — so a Binance
+bulk-archive provider was built as a scoped, documented exception to §6
+(§33) and run against years of real history for SOL + 7 tokens: **356
+pooled cross-up events, real cross-token clustering found and quantified
+(§34)**. See "CEX base-rate study" below. Verified against `main` by clean
+clone and tree-versus-index diff after every push.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -143,7 +145,7 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates |
 | Rules | `src/rules/` | entry conditions, intrabar exits, portfolio limits |
 | Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
-| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `backtest` |
+| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study — §33–§34), `backtest` |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
 
 **Nothing here can place a trade.** There is no execution layer and no code path
@@ -411,6 +413,57 @@ far, on data volume alone), not "does this make money."
 **Awaiting operator direction** on whether to run `data:fetch` + `backtest`
 against PYTH specifically, re-screen JTO/BONK with the rigorous resolver, add
 more tokens to the screen, or something else.
+
+## CEX base-rate study — 356 pooled cross-ups, Binance bulk archives (§33–§34)
+
+The 6-token GeckoTerminal screen above pooled only 6 cross-up events in 179
+days — not a usable sample, and the 180-day free-tier ceiling means no
+amount of re-fetching gets more history from that source. Operator
+direction: build a Binance historical-dump provider (`data.binance.vision`
+— confirmed reachable, a different domain from the region-blocked
+`api.binance.com`) as a **scoped exception to DECISIONS §6**, not a
+reversal — close is exact under ratio synthesis even though high/low stay
+approximate bounds, and RSI (built from close alone) is the measured
+bottleneck, not MFI or relative-strength (§31/§32). MFI/ATR remain
+approximate on this source; every report says so.
+
+`npm run data:cex-study` pulled SOL + JUP/JTO/PYTH/WIF/BONK/RAY/ORCA vs
+USDT as far back as each is listed (608–1826 days per token), synthesized
+each TOKEN/SOL ratio, and ran the same `computeEntryFunnel` as `data:
+screen` — no parameter tuning, current settings only.
+
+| Symbol | History (d) | Coverage | Gaps | Cross-up | MFI-confirm | Rel-strength | Regime |
+|---|---|---|---|---|---|---|---|
+| JUP | 943 | 96.75% | 0 | 50 | 36 | 7 | 1 |
+| JTO | 974 | 99.32% | 0 | 63 | 45 | 24 | 11 |
+| PYTH | 912 | 99.84% | 0 | 56 | 28 | 14 | 8 |
+| WIF | 883 | 99.48% | 0 | 51 | 39 | 27 | 13 |
+| BONK | 974 | 98.53% | 0 | 44 | 27 | 13 | 7 |
+| RAY | 1826 | 99.48% | 3 | 61 | 38 | 12 | 8 |
+| ORCA | 608 | 99.09% | 0 | 31 | 13 | 4 | 1 |
+
+**CEX data is essentially gapless, confirmed** (0-3 gaps per token across
+years of hourly bars). Coverage under 100% with 0 gaps is real but benign —
+it means the token's actual exchange listing started partway through the
+first archived calendar month (confirmed directly: JUP's real first bar is
+2024-01-31, matching its public TGE date), not missing data.
+
+**Pooled total: 356 cross-up events — clears the operator's 50-event
+threshold.** Clustering, checked because the operator specifically asked
+whether pooled events are independent: 356 events land on 210 distinct UTC
+days (59%), and of the 10 busiest days, 9 are genuinely **cross-token**
+(multiple different symbols firing the same day, not one token repeating) —
+real evidence of a shared driver, most plausibly SOL-wide moves, showing up
+clearly at this sample size where the 6-event screen was too small to see
+it. 210 distinct days is an upper bound on the effective independent
+sample, not a confirmed floor — a SOL-wide move can plausibly span more
+than one calendar day, which a proper decluster step would need to handle.
+Full breakdown (busiest-days list, per-token event counts) in DECISIONS §34.
+
+**Not run: no backtest, no parameter sweep** — per operator direction, this
+was a baseline read only. **Awaiting operator direction** on the
+in-sample/out-of-sample sweep design against these 356 (or ~210 effective)
+events.
 
 ## What is deliberately NOT built
 

@@ -1187,3 +1187,83 @@ not publish it as a monthly file until the month closes. This is a
 recency gap, not a history-depth one; the daily-archive path that would
 close it was not built (not needed for a base-rate study over years of
 history, and not asked for).
+
+## 34. The CEX study live run: 356 pooled cross-ups, real but incomplete clustering
+
+**Built `npm run data:cex-study`** (`src/cli/cex-study.ts`) on top of §33's
+provider: for SOL and each of JUP/JTO/PYTH/WIF/BONK/RAY/ORCA, discover the
+full listed month range, download+cache every archive, synthesize TOKEN/SOL
+(`synthesizeRatioSeries`, unchanged from §6), and run the exact same
+`computeEntryFunnel` §32's `data:screen` uses — no duplicated strategy
+logic, no parameter tuning (default RSI(14)/MFI(14)/entry config, same as
+every prior funnel measurement). Writes to a separate `data/binance-vision.
+db`, not the DEX-sourced `data/candles.db`, so study data can never be
+mistaken for validation data. Prints the MFI/ATR-approximate, CEX-price,
+Binance-listed-only caveat block at the top of every run, unconditionally.
+
+**The live run** (from cold cache — ~300 archive downloads, none rate-
+limited, completed in under two minutes):
+
+| Symbol | Listed | History (d) | Coverage | Gaps | Reliable | Prior-OB | Cross-up | MFI-confirm | Rel-strength | Regime |
+|---|---|---|---|---|---|---|---|---|---|---|
+| JUP | 2024-01→2026-07 | 943 | 96.75% | 0 | 21834 | 8332 | 50 | 36 | 7 | 1 |
+| JTO | 2023-12→2026-07 | 974 | 99.32% | 0 | 23154 | 8285 | 63 | 45 | 24 | 11 |
+| PYTH | 2024-02→2026-07 | 912 | 99.84% | 0 | 21790 | 7558 | 56 | 28 | 14 | 8 |
+| WIF | 2024-03→2026-07 | 883 | 99.48% | 0 | 21020 | 6988 | 51 | 39 | 27 | 13 |
+| BONK | 2023-12→2026-07 | 974 | 98.53% | 0 | 22970 | 7379 | 44 | 27 | 13 | 7 |
+| RAY | 2021-08→2026-07 | 1826 | 99.48% | 3 | 43347 | 14666 | 61 | 38 | 12 | 8 |
+| ORCA | 2024-12→2026-07 | 608 | 99.09% | 0 | 14397 | 4859 | 31 | 13 | 4 | 1 |
+
+SOL/USDT (reference): 99.50% coverage, 10 gaps, over the full 2020-08→
+2026-07 span. **CEX data is essentially gapless, confirmed** — every token
+above has 0-3 gaps in years of hourly bars, an order of magnitude cleaner
+than any GeckoTerminal series reviewed so far (§24, §31). No token crossed
+the 0.5% gap-rate warning threshold built into the script.
+
+**Coverage below 100% with (near-)zero gaps is a real finding, checked, not
+a bug:** JUP shows 96.75% coverage with 0 gaps — mathematically that can
+only mean bars missing from the EDGES, not the middle, since gap detection
+only flags discontinuities BETWEEN observed bars. Confirmed directly against
+the cached database: JUP's real first candle is **2024-01-31**, not
+2024-01-01 — `fullListedRange`'s "from" is the first day of the first
+*archived* month, and Binance published a full January 2024 archive file
+for JUPUSDT even though the token only started trading on the exchange at
+the very end of that month (JUP's public TGE was 2024-01-31, consistent).
+Same pattern confirmed for ORCA (first real bar 2024-12-06, archived from
+2024-12-01) and BONK (first real bar 2023-12-15, archived from 2023-12-01).
+**"Coverage %" in this report is measured against the archived month's
+first day, not the token's actual first trade — a coverage number under
+100% with 0 gaps means the exchange listing started partway through the
+first archived month, not that data is missing.**
+
+**Pooled total: 356 cross-up events across all 7 tokens, full listed
+history — clears the operator's 50-event threshold.** This is the number a
+sweep can be designed against; nothing about entry rules or parameters was
+touched to reach it, only the data source.
+
+**Clustering, checked at two different granularities because the operator's
+concern is specifically about cross-token correlation, not raw event
+count:**
+- **356 events land on 210 distinct UTC days** (59% of events are the only
+  cross-up that day). 86 days have more than one event, accounting for
+  232 of 356 events (65.17%).
+- **Of the top 10 busiest days, 9 are genuinely cross-token** (multiple
+  different symbols crossing up the same UTC day — e.g. 2025-08-05: JTO,
+  JTO, PYTH, WIF, WIF, BONK, BONK, 4 distinct tokens in one day), not one
+  token repeatedly re-triggering. Only 2024-09-10 (5 events, all JTO) is a
+  single-token repeat cluster. **This is the pattern the operator's original
+  hypothesis predicted**: correlated alts firing together, most plausibly
+  on a shared SOL-wide move, and it shows up clearly at this larger sample
+  size where the 6-event §32 screen was too small to see it.
+- **210 distinct days is an upper bound on the effective independent
+  sample, not a confirmed floor.** Same-day co-occurrence is the clearest
+  signal of a shared driver, but a SOL-wide dip-and-recovery can plausibly
+  span more than one calendar day, in which case even 210 overstates
+  independence. Not resolved here — a proper declustering approach (e.g.
+  a minimum-gap-between-counted-events window) is a sweep-design question,
+  not answered by this baseline run.
+
+**Not run: no backtest, no parameter sweep.** Per operator direction, this
+script stops at reporting the event count and clustering — designing an
+in-sample/out-of-sample sweep against these 356 (or ~210 effective) events
+is the next, separate decision.
