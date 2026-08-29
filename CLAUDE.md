@@ -13,9 +13,12 @@ else:**
 ## STOP — do not start step 6
 
 The next action is **not yours**. The operator must run the data layer against
-real candles on their own machine and report four numbers back. Step 6 (the
-backtest engine) is blocked until then. `docs/STATUS.md` has the commands and
-the decision rule.
+real candles on their own machine and report back what the fetch shows. Step 6
+(the backtest engine) is blocked until then. `docs/STATUS.md` has the commands
+and what to look for — it changed from "four numbers" to a GeckoTerminal-shaped
+review (pool coverage/gaps/rejects/wick-ATR diagnostics) after DECISIONS §18
+switched the default provider away from Binance; read STATUS.md, not this
+paragraph, for the current checklist.
 
 Do not build speculatively while waiting. If asked to continue and the data
 review has not happened, say so rather than proceeding.
@@ -61,14 +64,21 @@ data layer from three consecutive pushes (DECISIONS §15).
 
 ```bash
 npm install
-npm test                  # 183 test cases across 9 files
+npm test                  # see docs/STATUS.md for the current test count
 npm run typecheck
 npm run config:check -- config/default.yaml
 npm run data:fetch -- --symbol JUP --interval 1h --days 90
+npm run data:fetch -- --symbol JUP --provider binance      # alternate, DECISIONS §18
 ```
 
-`data:fetch` needs outbound access to `api.binance.com`. It will not run in a
-sandboxed environment that blocks that host — that is expected, not a bug.
+`data:fetch` defaults to GeckoTerminal (`api.geckoterminal.com`, free, no key)
+since Binance is regionally blocked for this project's operator — see
+DECISIONS §18. `--provider binance` needs outbound access to `api.binance.com`
+instead. Neither will run in a sandboxed environment that blocks its host —
+that is expected, not a bug.
+
+Node is pinned to **22.x** in `package.json`'s `engines` — `better-sqlite3` has
+no Node 24 prebuild and needs a C++ toolchain to build from source there.
 
 Anything under `data/` — the SQLite cache and `raw-sample.json` — is generated at
 runtime and gitignored. It is never in the repository; its absence in a fresh

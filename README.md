@@ -25,7 +25,10 @@ addresses, and the bot only decides *when* to enter and exit within them.
 
 ## Setup from a clean clone
 
-Requires **Node 20+**.
+Requires **Node 22** — pinned in `package.json`'s `engines` field, not just a
+minimum. `better-sqlite3` has no prebuilt binary for Node 24 yet, and building
+it from source needs a C++ toolchain most machines don't have set up. Via
+[nvm](https://github.com/nvm-sh/nvm): `nvm install 22 && nvm use 22`.
 
 ```bash
 git clone https://github.com/mpproject90/calude2
@@ -65,37 +68,63 @@ Secrets live in `.env` only, never in config, never in logs, never committed.
 
 ## Reviewing the data layer against real candles
 
-This is the current step. It needs outbound access to `api.binance.com` and no
-API key. **It will not run inside a sandboxed environment that blocks that
-host** — run it on your own machine.
+This is the current step. The default provider is **GeckoTerminal**
+(DECISIONS §18) — it needs outbound access to `api.geckoterminal.com`, no API
+key. Binance is unreachable for the operator this project was built for
+(regional block), so it is no longer the default, but it remains available via
+`--provider binance` for anyone who can reach `api.binance.com`. **Neither will
+run inside a sandboxed environment that blocks its host** — run this on your
+own machine.
 
 ```bash
 npm run data:fetch -- --symbol JUP --interval 1h --days 90
 npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db
+npm run data:fetch -- --symbol JUP --provider binance      # alternate path
 ```
 
-Pulls `<SYMBOL>USDT` and `SOLUSDT`, caches both in SQLite, synthesizes
-`<SYMBOL>/SOL`, and reports coverage, gaps, rejections and range widening. It
-also writes `data/raw-sample.json` — verbatim response rows plus this build's
-parse of row 0. That file is **generated locally and gitignored**: it is not part
-of the repository and will not be present in a fresh clone.
+GeckoTerminal needs the token's Solana mint address to find its pools: pass
+`--address <mint>`, or add the token to `config/default.yaml`'s `tokens[]` and
+it is looked up by `--symbol` (already true for JUP).
+
+The GeckoTerminal path pulls the token's **dominant pool against SOL directly**
+— real pool OHLC, no ratio synthesis — plus an independent SOL/USDC reference
+pool the regime and relative-strength filters still need (DECISIONS §20). When
+a token has more than one SOL pool, the one with the highest total traded
+volume over the window is used as the sole source; if dominance shifted to a
+different pool partway through, that is reported as a fact, never spliced in
+(DECISIONS §19). It also writes `data/raw-sample.json` — verbatim response
+bodies plus this build's parse of row 0. That file is **generated locally and
+gitignored**: it is not part of the repository and will not be present in a
+fresh clone.
 
 What to scrutinise:
 
-- **Bar coverage %** — well below 100% means Binance history is thinner than
-  expected for that pair.
-- **Gap count** — should be near zero for a CEX. Anything substantial means the
-  interval-alignment assumption is wrong.
+- **Bar coverage %** — for pool data, well below 100% is *expected* for a
+  young pool (history is bounded by when the pool was created, not by an
+  exchange listing date) and is not on its own a red flag. Cross-check against
+  the reported `createdAt` for the selected pool before treating it as one.
+- **Gap count** — a real gap (not explained by pool age) means the
+  interval-alignment assumption is wrong, or the dominant pool went quiet for
+  a stretch.
 - **Rejected candles** — should be zero. Non-zero means real data violates an
   invariant asserted in `src/data/validate.ts`.
-- **Range widening** — how much wider the synthesized high/low is than
-  `|close − open|`. If it is large, MFI on the synthesized series is distorted.
-  **Build the 1m-aggregated path before concluding anything about MFI** — exhaust
-  the data-quality fix before changing the strategy's shape.
+- **Pool dominance migration** — if reported, review which pool traded when
+  before trusting the series; the tool does not resolve this for you.
+- **Wick/ATR diagnostics** (GeckoTerminal path only, replaces range widening —
+  DECISIONS §23) — the wick-to-body ratio distribution and the count of bars
+  whose high/low sits more than 3× ATR(14) outside the open-close body. This is
+  real pool OHLC, so a bad number here means thin-liquidity noise (a wash trade
+  or one oversized swap), not a synthesis artifact — different cause, same
+  "review before trusting MFI/ATR on this token" conclusion.
+- **Range widening** (Binance path only) — how much wider the synthesized
+  high/low is than `|close − open|`. If large, **build the 1m-aggregated path
+  before concluding anything about MFI** (DECISIONS §6) — exhaust the
+  data-quality fix before changing the strategy's shape.
 
-The Binance provider has **never made a real request** (every test uses a mock),
-so this review is also how its parsing gets verified. If anything looks wrong,
-send back the locally generated `data/raw-sample.json` described above.
+Both providers have **never made a real request** from inside this build
+(every test uses a mock), so this review is also how their parsing gets
+verified. If anything looks wrong, send back the locally generated
+`data/raw-sample.json` described above.
 
 ## Layout
 
@@ -107,7 +136,8 @@ docs/DECISIONS.md     design decisions and their reasoning
 docs/STATUS.md        build state, blockers, what is unverified
 src/cli/              config:check and data:fetch entry points
 src/config/           zod schema, loader, live-trading gate
-src/data/             provider, cache, validation, gap detection, synthesis
+src/data/             providers, cache, validation, gap detection, pool selection
+src/data/providers/   GeckoTerminal (default), Binance (alternate), DexPaprika (stub)
 src/db/               SQLite schema and connection
 src/filters/          the filter stack
 src/indicators/       RSI, MFI, ATR with warm-up gating
@@ -115,6 +145,7 @@ src/rules/            entry, exit and portfolio limits
 src/types/            Candle, Interval, IndicatorValue, CandleProvider
 src/util/amount.ts    integer (bigint) token math — no floats on-chain
 src/util/logger.ts    structured logging with secret redaction
+src/util/errorChain.ts  fail-loud error formatting (status/URL/full cause chain)
 test/fixtures/        cross-language indicator reference values (committed)
 ```
 

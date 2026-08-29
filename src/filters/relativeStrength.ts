@@ -5,8 +5,22 @@
  * RSI < 30 at once and a naive bot opens N positions that are one leveraged bet
  * on SOL. Entry therefore requires the token to be oversold RELATIVE to SOL.
  *
- * Rule: tokenReturn - solReturn <= -minUnderperformanceVsSol
+ * Rule: (1 + tokenReturn) / (1 + solReturn) - 1 <= -minUnderperformanceVsSol
  * (decimal fraction; 0.05 = 5 percentage points of underperformance)
+ *
+ * FORMULA CHANGED (DECISIONS §20). Originally `tokenReturn - solReturn`, a
+ * subtractive approximation. Now pulling the JUP/SOL pool directly (DECISIONS
+ * §18) makes the exact figure available for free: the pool's own return over
+ * the lookback window IS (1+tokenReturn)/(1+solReturn) - 1 by construction, so
+ * there is no reason to keep the approximation now that the exact multiplicative
+ * relative-return is no harder to compute. The two formulas agree exactly
+ * whenever solReturn = 0 and diverge more as SOL's own move grows.
+ *
+ * SOL/USD is still fetched as an independent reference series — NOT made
+ * redundant by trading on JUP/SOL directly (DECISIONS §20) — because
+ * `regime.ts` needs SOL's own USD-denominated trend regardless of any token,
+ * and because token/SOL returns are still logged separately below for the
+ * deferred beta work (next paragraph).
  *
  * KNOWN LIMITATION — beta is ignored. A token that habitually moves ~1.4x SOL
  * will show percentage-point "underperformance" on any SOL drawdown purely from
@@ -47,7 +61,9 @@ export function evaluateRelativeStrength(input: RelativeStrengthInput): FilterRe
 
   const tokenReturn = tokenNow / tokenThen - 1;
   const solReturn = solNow / solThen - 1;
-  const differential = tokenReturn - solReturn;
+  // Exact multiplicative relative return, not the subtractive approximation —
+  // see the header comment and DECISIONS §20.
+  const differential = (tokenNow / tokenThen) / (solNow / solThen) - 1;
 
   const context = {
     tokenReturn,

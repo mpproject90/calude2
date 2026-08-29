@@ -10,6 +10,15 @@ import {
 import {
   synthesizeRatioSeries, rangeWideningRatio, assertSameInterval, SynthesisError,
 } from '../src/data/synthesize.js';
+import {
+  GeckoTerminalCandleProvider, GeckoTerminalProviderError, GeckoTerminalRateLimitError,
+  type FetchFn as GtFetchFn,
+} from '../src/data/providers/geckoterminal.js';
+import {
+  DexPaprikaCandleProvider, DexPaprikaProviderError, type FetchFn as PaprikaFetchFn,
+} from '../src/data/providers/dexpaprika.js';
+import { selectDominantPool, type PoolSeries } from '../src/data/poolSelection.js';
+import { computeWickDiagnostics } from '../src/data/wickDiagnostics.js';
 
 const H = 3_600_000;
 const T0 = 1_700_000_000_000 - (1_700_000_000_000 % H);   // aligned to the hour
@@ -310,6 +319,19 @@ describe('Binance provider', () => {
     await expect(provider(fetchFn).getCandles('JUP', '1h', T0, T0 + H))
       .rejects.toThrow(/returned 500/);
   });
+
+  it('wraps a raw network failure with the URL and preserves the cause chain', async () => {
+    // The bug found this session: Node's fetch throws `TypeError: fetch failed`
+    // for a TLS/DNS/connection failure, with the real reason only in `.cause`.
+    const inner = new Error('certificate for wrong domain');
+    const fetchFn: FetchFn = async () => { throw Object.assign(new TypeError('fetch failed'), { cause: inner }); };
+    const err = await provider(fetchFn).getCandles('JUP', '1h', T0, T0 + H).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(BinanceProviderError);
+    expect((err as Error).message).toContain('network request failed for');
+    expect((err as Error).message).toContain('symbol=JUPUSDT');
+    expect((err as Error & { cause?: unknown }).cause).toBeInstanceOf(TypeError);
+    expect(((err as Error & { cause?: Error }).cause as Error).cause).toBe(inner);
+  });
 });
 
 describe('ratio synthesis', () => {
@@ -393,5 +415,332 @@ describe('ratio synthesis', () => {
   it('refuses to synthesize across mismatched intervals', () => {
     expect(() => assertSameInterval('1h', '4h')).toThrow(SynthesisError);
     expect(() => assertSameInterval('1h', '1h')).not.toThrow();
+  });
+});
+
+describe('GeckoTerminal provider', () => {
+  const gtRow = (i: number, close = 10.5): (number | string)[] =>
+    [(T0 + i * H) / 1000, 10.0, 11.0, 9.0, close, 100.0];
+
+  const ohlcvBody = (rows: (number | string)[][]): unknown =>
+    ({ data: { attributes: { ohlcv_list: rows } } });
+
+  const mockFetch = (
+    pages: unknown[], statuses: number[] = [],
+  ): { fetchFn: GtFetchFn; calls: string[] } => {
+    const calls: string[] = [];
+    let n = 0;
+    const fetchFn: GtFetchFn = async (url) => {
+      calls.push(url);
+      const status = statuses[n] ?? 200;
+      const body = pages[n] ?? { data: [] };
+      n++;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: { get: (h: string) => (h === 'Retry-After' ? '1' : null) },
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      };
+    };
+    return { fetchFn, calls };
+  };
+
+  const provider = (fetchFn: GtFetchFn, over = {}) =>
+    new GeckoTerminalCandleProvider({ fetchFn, sleepFn: async () => {}, ...over });
+
+  it('declares which intervals it supports — every project Interval maps to a timeframe/aggregate', () => {
+    const p = provider(mockFetch([]).fetchFn);
+    for (const i of ['1m', '5m', '15m', '1h', '4h', '1d'] as const) expect(p.supports(i)).toBe(true);
+  });
+
+  it('throws for a token with no pool resolved rather than guessing', async () => {
+    const p = provider(mockFetch([]).fetchFn);
+    await expect(p.getCandles('JUP', '1h', T0, T0 + H)).rejects.toThrow(GeckoTerminalProviderError);
+  });
+
+  it('requests the pool-native price via currency=token&token=base', async () => {
+    const { fetchFn, calls } = mockFetch([ohlcvBody([gtRow(0)])]);
+    const p = provider(fetchFn, { poolMap: { JUP: 'poolAddr123' } });
+    await p.getPoolOhlcv('poolAddr123', '1h', T0, T0 + H);
+    expect(calls[0]).toContain('pools/poolAddr123/ohlcv/hour');
+    expect(calls[0]).toContain('currency=token');
+    expect(calls[0]).toContain('token=base');
+  });
+
+  it('parses OHLCV rows, converting seconds to milliseconds', async () => {
+    const { fetchFn } = mockFetch([ohlcvBody([gtRow(0, 12.25)])]);
+    const out = await provider(fetchFn).getPoolOhlcv('pool', '1h', T0, T0 + H);
+    expect(out[0]).toEqual({ timestamp: T0, open: 10, high: 11, low: 9, close: 12.25, volume: 100 });
+  });
+
+  it('paginates backward across pages regardless of within-page order, dedupes at the seam', async () => {
+    const from = T0;
+    const to = T0 + 1999 * H;
+    const page1 = Array.from({ length: 1000 }, (_, i) => gtRow(1000 + i));   // newest 1000
+    const page2 = Array.from({ length: 1000 }, (_, i) => gtRow(i));          // oldest 1000
+    const { fetchFn, calls } = mockFetch([ohlcvBody(page1), ohlcvBody(page2)]);
+    const out = await provider(fetchFn).getPoolOhlcv('pool', '1h', from, to);
+    expect(calls).toHaveLength(2);
+    expect(out).toHaveLength(2000);
+    expect(out[0]!.timestamp).toBe(T0);
+    expect(out[out.length - 1]!.timestamp).toBe(to);
+  });
+
+  it('excludes rows outside the requested window', async () => {
+    const { fetchFn } = mockFetch([ohlcvBody([gtRow(0), gtRow(1), gtRow(2)])]);
+    const out = await provider(fetchFn).getPoolOhlcv('pool', '1h', T0 + H, T0 + H);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.timestamp).toBe(T0 + H);
+  });
+
+  it('stops when the pool has nothing to return', async () => {
+    const { fetchFn, calls } = mockFetch([{ data: { attributes: { ohlcv_list: [] } } }]);
+    const out = await provider(fetchFn).getPoolOhlcv('pool', '1h', T0, T0 + 5000 * H);
+    expect(out).toHaveLength(0);
+    expect(calls).toHaveLength(1);
+  });
+
+  it('backs off on 429 and then succeeds', async () => {
+    const { fetchFn, calls } = mockFetch(
+      [{ data: { attributes: { ohlcv_list: [] } } }, ohlcvBody([gtRow(0)])], [429, 200],
+    );
+    const out = await provider(fetchFn).getPoolOhlcv('pool', '1h', T0, T0 + H);
+    expect(calls).toHaveLength(2);
+    expect(out).toHaveLength(1);
+  });
+
+  it('gives up after exhausting retries on repeated 429s', async () => {
+    const { fetchFn } = mockFetch(
+      [{}, {}, {}, {}], [429, 429, 429, 429],
+    );
+    await expect(provider(fetchFn).getPoolOhlcv('pool', '1h', T0, T0 + H))
+      .rejects.toThrow(GeckoTerminalRateLimitError);
+  });
+
+  it('throws with the raw body attached when the OHLCV shape does not match the model', async () => {
+    const { fetchFn } = mockFetch([{ data: { attributes: {} } }]);
+    const err: unknown = await provider(fetchFn).getPoolOhlcv('pool', '1h', T0, T0 + H)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GeckoTerminalProviderError);
+    expect((err as Error).message).toMatch(/ohlcv_list/);
+    expect((err as Error & { cause?: unknown }).cause).toEqual({ data: { attributes: {} } });
+  });
+
+  it('wraps a raw network failure with the URL and preserves the cause', async () => {
+    const inner = new Error('certificate for wrong domain');
+    const fetchFn: GtFetchFn = async () => { throw Object.assign(new TypeError('fetch failed'), { cause: inner }); };
+    const err: unknown = await provider(fetchFn).getPoolOhlcv('pool', '1h', T0, T0 + H)
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GeckoTerminalProviderError);
+    expect((err as Error).message).toContain('network request failed for');
+    expect(((err as Error & { cause?: Error }).cause as Error).cause).toBe(inner);
+  });
+
+  it('finds pools for a token filtered to a specific pair, and parses pool fields', async () => {
+    const body = {
+      data: [
+        {
+          attributes: { address: 'poolSol', pool_created_at: '2024-01-01T00:00:00Z', reserve_in_usd: '500000' },
+          relationships: {
+            base_token: { data: { id: 'solana_JUPMINT' } },
+            quote_token: { data: { id: 'solana_SOLMINT' } },
+            dex: { data: { id: 'raydium' } },
+          },
+        },
+        {
+          attributes: { address: 'poolUsdc', reserve_in_usd: '1000' },
+          relationships: {
+            base_token: { data: { id: 'solana_JUPMINT' } },
+            quote_token: { data: { id: 'solana_USDCMINT' } },
+            dex: { data: { id: 'meteora' } },
+          },
+        },
+      ],
+    };
+    const { fetchFn, calls } = mockFetch([body]);
+    const candidates = await provider(fetchFn).searchPools('JUPMINT', 'SOLMINT');
+    expect(calls[0]).toContain('tokens/JUPMINT/pools');
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toEqual({
+      address: 'poolSol', dex: 'raydium', createdAt: '2024-01-01T00:00:00Z',
+      reserveUsd: 500000, baseTokenAddress: 'JUPMINT', quoteTokenAddress: 'SOLMINT',
+    });
+  });
+
+  it('throws with the raw entry attached when a pool entry is missing required fields', async () => {
+    const body = { data: [{ attributes: {}, relationships: {} }] };
+    const { fetchFn } = mockFetch([body]);
+    await expect(provider(fetchFn).searchPools('JUPMINT', 'SOLMINT')).rejects.toThrow(GeckoTerminalProviderError);
+  });
+
+  it('setPool resolves getCandles to the chosen pool', async () => {
+    const { fetchFn, calls } = mockFetch([ohlcvBody([gtRow(0)])]);
+    const p = provider(fetchFn);
+    p.setPool('JUP', 'chosenPool');
+    await p.getCandles('JUP', '1h', T0, T0 + H);
+    expect(calls[0]).toContain('pools/chosenPool/ohlcv');
+  });
+});
+
+describe('DexPaprika provider (alternate, not wired into the default fetch path)', () => {
+  const row = (i: number, close = 10.5) => ({
+    time_open: new Date(T0 + i * H).toISOString(),
+    time_close: new Date(T0 + i * H + H - 1).toISOString(),
+    open: 10, high: 11, low: 9, close, volume: 100,
+  });
+
+  const mockFetch = (
+    pages: unknown[][], statuses: number[] = [],
+  ): { fetchFn: PaprikaFetchFn; calls: string[] } => {
+    const calls: string[] = [];
+    let n = 0;
+    const fetchFn: PaprikaFetchFn = async (url) => {
+      calls.push(url);
+      const status = statuses[n] ?? 200;
+      const body = pages[n] ?? [];
+      n++;
+      return {
+        ok: status >= 200 && status < 300,
+        status,
+        headers: { get: () => null },
+        json: async () => body,
+        text: async () => JSON.stringify(body),
+      };
+    };
+    return { fetchFn, calls };
+  };
+
+  const provider = (fetchFn: PaprikaFetchFn, over = {}) =>
+    new DexPaprikaCandleProvider({ fetchFn, sleepFn: async () => {}, poolMap: { JUP: 'poolAddr' }, ...over });
+
+  it('does not claim to support 4h — this API does not offer it', () => {
+    const p = provider(mockFetch([]).fetchFn);
+    expect(p.supports('4h')).toBe(false);
+    expect(p.supports('1h')).toBe(true);
+  });
+
+  it('parses ISO time_open into an epoch-ms timestamp', async () => {
+    const { fetchFn } = mockFetch([[row(0, 12.25)]]);
+    const out = await provider(fetchFn).getCandles('JUP', '1h', T0, T0 + H);
+    expect(out[0]).toEqual({ timestamp: T0, open: 10, high: 11, low: 9, close: 12.25, volume: 100 });
+  });
+
+  it('throws for an unresolved token rather than guessing', async () => {
+    const p = new DexPaprikaCandleProvider({ fetchFn: mockFetch([]).fetchFn });
+    await expect(p.getCandles('WIF', '1h', T0, T0 + H)).rejects.toThrow(DexPaprikaProviderError);
+  });
+
+  it('throws on a non-array body rather than treating an error as data', async () => {
+    const { fetchFn } = mockFetch([{ error: 'not found' } as never]);
+    await expect(provider(fetchFn).getCandles('JUP', '1h', T0, T0 + H)).rejects.toThrow(/not an array/);
+  });
+
+  it('wraps a raw network failure with the URL and preserves the cause', async () => {
+    const inner = new Error('certificate for wrong domain');
+    const fetchFn: PaprikaFetchFn = async () => { throw Object.assign(new TypeError('fetch failed'), { cause: inner }); };
+    const err: unknown = await provider(fetchFn).getCandles('JUP', '1h', T0, T0 + H).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DexPaprikaProviderError);
+    expect((err as Error).message).toContain('network request failed for');
+    expect(((err as Error & { cause?: Error }).cause as Error).cause).toBe(inner);
+  });
+});
+
+describe('pool selection', () => {
+  const vol = (i: number, v: number): Candle => ({ ...bar(i), volume: v });
+
+  it('selects the single pool with the highest total volume', () => {
+    const series: PoolSeries[] = [
+      { address: 'small', candles: [vol(0, 10), vol(1, 10)] },
+      { address: 'big', candles: [vol(0, 500), vol(1, 500)] },
+    ];
+    const r = selectDominantPool(series, '1h');
+    expect(r.selected).toBe('big');
+    expect(r.volumeShareByPool['big']).toBeCloseTo(500 / 510, 6);
+    expect(r.migrated).toBe(false);
+  });
+
+  it('reports coverage per pool, including a pool that only covers part of the window', () => {
+    const series: PoolSeries[] = [
+      { address: 'early', candles: [vol(0, 100), vol(1, 100)] },
+      { address: 'late', candles: [vol(2, 200), vol(3, 200)] },
+    ];
+    const r = selectDominantPool(series, '1h');
+    expect(r.coverageByPool['early']).toEqual({ firstTimestamp: T0, lastTimestamp: T0 + H, bars: 2 });
+    expect(r.coverageByPool['late']).toEqual({ firstTimestamp: T0 + 2 * H, lastTimestamp: T0 + 3 * H, bars: 2 });
+    // "late" wins on total volume even though it doesn't cover the early bars —
+    // those bars become a genuine gap once the selected pool's series is used,
+    // never backfilled from "early".
+    expect(r.selected).toBe('late');
+  });
+
+  it('flags migration when the locally-dominant pool changes mid-window, without resolving it', () => {
+    const series: PoolSeries[] = [
+      { address: 'A', candles: [vol(0, 500), vol(1, 500), vol(2, 10), vol(3, 10)] },
+      { address: 'B', candles: [vol(0, 10), vol(1, 10), vol(2, 500), vol(3, 500)] },
+    ];
+    const r = selectDominantPool(series, '1h');
+    expect(r.migrated).toBe(true);
+    expect(r.dominancePeriods.map((p) => p.pool)).toEqual(['A', 'B']);
+  });
+
+  it('breaks ties by input order, deterministically', () => {
+    const series: PoolSeries[] = [
+      { address: 'first', candles: [vol(0, 100)] },
+      { address: 'second', candles: [vol(0, 100)] },
+    ];
+    const r = selectDominantPool(series, '1h');
+    expect(r.selected).toBe('first');
+  });
+
+  it('selects nothing when no pool ever traded', () => {
+    const series: PoolSeries[] = [{ address: 'dead', candles: [] }];
+    const r = selectDominantPool(series, '1h');
+    expect(r.selected).toBeNull();
+  });
+});
+
+describe('wick/ATR diagnostics — the replacement for range-widening on real pool data', () => {
+  it('reports one bar counted, regardless of shape', () => {
+    const d = computeWickDiagnostics([
+      { timestamp: T0, open: 10, high: 10, low: 9, close: 9, volume: 100 },
+    ]);
+    expect(d.bars).toBe(1);
+  });
+
+  it('flags an all-wick (zero-body) bar as an infinite ratio rather than clipping it', () => {
+    const d = computeWickDiagnostics([
+      { timestamp: T0, open: 10, high: 12, low: 8, close: 10, volume: 100 },
+    ]);
+    expect(d.wickToBody.infiniteCount).toBe(1);
+    expect(d.wickToBody.max).toBe(Infinity);
+  });
+
+  it('reports zero wick-to-body ratio for a body-filling bar with no excursion', () => {
+    const d = computeWickDiagnostics([
+      { timestamp: T0, open: 10, high: 11, low: 10, close: 11, volume: 100 },
+    ]);
+    expect(d.wickToBody.p50).toBe(0);
+    expect(d.wickToBody.infiniteCount).toBe(0);
+  });
+
+  it('flags a bar whose wick sits far outside its own recent ATR as an outlier', () => {
+    // 120 quiet bars (well past the period*7=98 ATR warm-up), then one bar
+    // with a high far beyond anything the recent true range would predict.
+    const quiet: Candle[] = Array.from({ length: 120 }, (_, i) => ({
+      timestamp: T0 + i * H, open: 10, high: 10.2, low: 9.8, close: 10, volume: 100,
+    }));
+    const spike: Candle = { timestamp: T0 + 120 * H, open: 10, high: 50, low: 9.8, close: 10.1, volume: 100 };
+    const d = computeWickDiagnostics([...quiet, spike], { atrPeriod: 14 });
+    expect(d.atrOutlierCount).toBe(1);
+  });
+
+  it('excludes bars still in ATR warm-up from the outlier count rather than misjudging them', () => {
+    const short: Candle[] = Array.from({ length: 5 }, (_, i) => ({
+      timestamp: T0 + i * H, open: 10, high: 30, low: 1, close: 10, volume: 100,
+    }));
+    const d = computeWickDiagnostics(short, { atrPeriod: 14 });
+    expect(d.atrOutlierCount).toBe(0);
+    expect(d.atrUnreliableCount).toBe(5);
   });
 });

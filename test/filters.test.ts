@@ -17,14 +17,17 @@ function movedBy(ret: number, lookback = 24, start = 100): number[] {
 describe('SOL-relative strength', () => {
   const base = { lookback: 24, minUnderperformanceVsSol: 0.05 };
 
-  it('REJECTS correlation: SOL -12%, token -13% is a 1pp differential', () => {
+  it('REJECTS correlation: SOL -12%, token -13% is a ~1pp differential', () => {
     const r = evaluateRelativeStrength({
       ...base,
       tokenCloses: movedBy(-0.13),
       solCloses: movedBy(-0.12),
     });
     expect(r.pass).toBe(false);
-    expect(r.context['differential'] as number).toBeCloseTo(-0.01, 10);
+    // Exact multiplicative relative return (DECISIONS §20), not -0.01: the
+    // subtractive approximation and the exact figure only coincide when
+    // solReturn is 0.
+    expect(r.context['differential'] as number).toBeCloseTo(0.87 / 0.88 - 1, 10);
   });
 
   it('ACCEPTS dislocation: SOL flat, token -13%', () => {

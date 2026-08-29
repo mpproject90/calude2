@@ -111,4 +111,9 @@ describe('repository hygiene', () => {
     expect(isIgnored('candles.db')).toBe(true);
     expect(isIgnored('src/scratch.log')).toBe(true);
   });
+
+  it('ignores .claude/ — local assistant state, not project source', () => {
+    expect(isIgnored('.claude/settings.local.json')).toBe(true);
+    expect(isIgnored('.claude/some/nested/file.json')).toBe(true);
+  });
 });

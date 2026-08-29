@@ -5,7 +5,7 @@
   "type": "module",
   "description": "Solana RSI/MFI mean-reversion trading bot \u2014 backtest, paper, live",
   "engines": {
-    "node": ">=20"
+    "node": "22.x"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",

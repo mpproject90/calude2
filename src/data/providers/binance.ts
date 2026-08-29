@@ -37,8 +37,8 @@ export class BinanceRateLimitError extends Error {
 }
 
 export class BinanceProviderError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = 'BinanceProviderError';
   }
 }
@@ -136,7 +136,17 @@ export class BinanceCandleProvider implements CandleProvider {
 
     for (let attempt = 1; attempt <= this.maxAttempts; attempt++) {
       await this.throttle();
-      const res = await this.fetchFn(url);
+
+      let res: Awaited<ReturnType<FetchFn>>;
+      try {
+        res = await this.fetchFn(url);
+      } catch (err) {
+        // A raw TLS/DNS/connection failure from Node's fetch surfaces as
+        // `TypeError: fetch failed` with the real reason nested in `.cause` —
+        // attach the URL and preserve the chain rather than letting it
+        // propagate bare (DECISIONS §22).
+        throw new BinanceProviderError(`network request failed for ${url}`, { cause: err });
+      }
 
       if (res.status === 429 || res.status === 418) {
         const retryAfter = Number(res.headers.get('Retry-After') ?? '0');

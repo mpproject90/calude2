@@ -6,7 +6,11 @@ next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
 **Last updated:** end of phase 1 step 2, plus the documentation and durability
-pass. Verified against `main` by clean clone and tree-versus-index diff.
+pass, plus the GeckoTerminal provider switch (DECISIONS §18–§23: Binance is
+regionally blocked for this project's operator, GeckoTerminal is now the
+default data provider, and this file's data-review checklist below changed
+accordingly). Verified against `main` by clean clone and tree-versus-index
+diff.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -30,28 +34,39 @@ documented state is preferable to finding unevaluable work.
 git clone https://github.com/mpproject90/calude2
 cd calude2
 npm install
-npm test                  # expect 183 cases across 9 files, all passing
+npm test                  # see the test-count table at the bottom of this file, all passing
 
 npm run data:fetch -- --symbol JUP --interval 1h --days 90
 npm run data:fetch -- --symbol JTO --interval 4h --days 365 --db data/candles.db
 ```
 
-Needs outbound access to `api.binance.com`. No API key. **It will not run in a
-sandboxed cloud environment that blocks that host** — that is expected, not a
-bug.
+Default provider is **GeckoTerminal** (`api.geckoterminal.com`, free, no key —
+DECISIONS §18), chosen because Binance is regionally blocked for this
+project's operator. Needs JUP's mint address to find its pools — already
+resolvable from `config/default.yaml`'s `tokens[]`, or pass `--address <mint>`
+for a token not yet configured. `--provider binance` remains available for
+anyone who can reach `api.binance.com`, using the original synthesis path
+(DECISIONS §6, §14). **Neither will run in a sandboxed cloud environment that
+blocks its host** — that is expected, not a bug.
 
-### The four numbers to report back
+### What to report back — GeckoTerminal path (default)
 
-| # | Number | Expected | If not |
+| # | Signal | Expected | If not |
 |---|---|---|---|
-| 1 | **Bar coverage %** (per series) | near 100% | Binance history is thinner than assumed for that pair |
-| 2 | **Gap count** | near zero for a CEX | the interval-alignment assumption is wrong |
-| 3 | **Rejected candles** | zero | real data violates an invariant asserted in `src/data/validate.ts` |
-| 4 | **Range widening** | as low as possible | see the decision rule below |
+| 1 | **Bar coverage %** (per series) | **NOT necessarily near 100%.** Pool history is bounded by when the pool was created, not by an exchange listing date — cross-check the printed `createdAt` for the selected pool before treating a low number as a problem. | if coverage is low AND the pool long predates the window, the interval-alignment assumption is wrong, or the dominant pool went quiet |
+| 2 | **Gap count** | near zero once pool age is accounted for | same as above |
+| 3 | **Rejected candles** | zero | real data violates an invariant in `src/data/validate.ts` |
+| 4 | **Pool dominance migration** | none, ideally | if reported, review which pool traded when (`fetch-data.ts` prints the periods) before trusting the series — this tool selects the highest-volume pool and reports a migration as a fact, it does not resolve one (DECISIONS §19) |
+| 5 | **Wick/ATR diagnostics** | few or no ATR-outlier bars | a nonzero count means thin-liquidity noise (a wash trade or one oversized swap) is producing phantom wicks that MFI/ATR would treat as real (DECISIONS §23) — this REPLACES the old range-widening check, which is moot once data isn't synthesized |
+
+`rangeWideningRatio` and its decision rule below still apply, unchanged, to
+`--provider binance` output — they do not apply to the GeckoTerminal path,
+where the high/low are real observations, not synthesized bounds.
 
 Also send the raw sample if anything looks wrong. It contains the verbatim first
-Binance response rows plus this build's parse of row 0, so a shape mismatch can
-be diagnosed from actual data rather than from a description of it.
+response body of each kind (one OHLCV response, one pool-search response) plus
+this build's parse of row 0, so a shape mismatch can be diagnosed from actual
+data rather than from a description of it.
 
 > **The raw sample is NOT in this repository and never will be.** `data/` is
 > gitignored, so `data/raw-sample.json` does not exist in a fresh clone — do not
@@ -60,12 +75,19 @@ be diagnosed from actual data rather than from a description of it.
 > assistant only when the operator pastes or uploads it. Path is configurable
 > with `--raw-sample <path>`.
 
-### Decision rule for range widening
+> **Cache caveat:** the candle cache keys on `(token, interval, timestamp)`
+> only — it does not record which provider or quote asset produced a row.
+> Re-running with a different `--provider` for the same symbol/db will
+> silently blend rows from two different quote assets. Use a fresh `--db` path
+> when switching providers (DECISIONS §18).
+
+### Decision rule for range widening (`--provider binance` only)
 
 Range widening measures how much wider the synthesized `<SYMBOL>/SOL` high/low is
 than `|close − open|`. The synthesized high and low are mathematical **bounds**,
 not observations (DECISIONS §6), which biases ATR high and distorts MFI's typical
-price.
+price. This does not apply on the default GeckoTerminal path — see the
+wick/ATR diagnostic above instead.
 
 **If the number is ugly: build the 1m-aggregated synthesis path BEFORE touching
 MFI's role.** A 1h ratio built from 1m bars is far more faithful than one built
@@ -77,13 +99,14 @@ leaves material distortion should MFI's role be reconsidered.
 
 ## What is built
 
-**Phase 1, steps 1–5 of 10.** **183 test cases across 9 files. Typecheck clean**
-under `strict`, `noImplicitAny`, `noUncheckedIndexedAccess`,
-`exactOptionalPropertyTypes`.
+**Phase 1, steps 1–5 of 10.** See the test-count table at the bottom of this
+file for the current suite size. **Typecheck clean** under `strict`,
+`noImplicitAny`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`.
 
 ```
 ✓ 1. Scaffold, config schema + validation, SQLite, .gitignore with .env
-✓ 2. Data layer — Binance provider, caching, gap detection, JUP/SOL synthesis
+✓ 2. Data layer — GeckoTerminal (default) + Binance (alternate) providers,
+     pool selection, caching, gap detection, wick/ATR diagnostics
 ✓ 3. Indicator engine with warm-up gating and reference-value tests
 ✓ 4. Filter stack, each filter independently tested
 ✓ 5. Rules engine (entry/exit) against synthetic candle series
@@ -98,15 +121,21 @@ Steps 3–5 were built before step 2 — an instruction skipped it by mistake an
 was filled in afterwards. Nothing depended on the order, because everything above
 the data layer operates on `Candle[]`.
 
+Step 2 was revisited after the initial build: Binance turned out to be
+regionally blocked for this project's operator, so GeckoTerminal became the
+default provider (DECISIONS §18–§23). Binance's original code, tests and
+JUP/SOL synthesis path are unchanged and remain available as an alternate.
+
 | Area | Module | What it does |
 |---|---|---|
 | Config | `src/config/` | zod schema, all-problems-at-once errors, live-trading gate |
 | Persistence | `src/db/` | candle cache, positions, rejected signals, regime events, token state |
-| Data | `src/data/` | Binance provider, repository + fetch log, validation, gap detection, ratio synthesis |
+| Data | `src/data/` | providers, repository + fetch log, validation, gap detection, pool selection, wick/ATR diagnostics |
+| Providers | `src/data/providers/` | GeckoTerminal (default), Binance (alternate), DexPaprika (stub, not wired in) |
 | Indicators | `src/indicators/` | RSI, MFI, ATR; warm-up gating; `{value, reliable, reason}` |
-| Filters | `src/filters/` | relative strength, cost floor, position sizing, regime, tier gates |
+| Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates |
 | Rules | `src/rules/` | entry conditions, intrabar exits, portfolio limits |
-| CLI | `src/cli/` | `config:check`, `data:fetch` |
+| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`) |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
 
 **Nothing here can place a trade.** There is no execution layer and no code path
@@ -114,26 +143,42 @@ submits a transaction.
 
 ## What is UNVERIFIED
 
-**The Binance provider has never made a real request.** `api.binance.com` is
-egress-blocked in the build container, so every provider test runs against an
-injected mock. Pagination, the weight budget, 429/418 backoff and row parsing are
-verified against a *model* of the API, not the API itself. **The operator's local
-fetch is what verifies this.**
+**Neither the GeckoTerminal provider (default) nor the Binance provider
+(alternate) has ever made a real request.** Both hosts are egress-blocked in
+the build container this was written in, so every provider test runs against
+an injected mock. For GeckoTerminal: pagination, pool search/selection, the
+rate throttle and JSON:API parsing are verified against a *documented model* of
+the response shape, not the API itself (DECISIONS §18). For Binance:
+pagination, the weight budget, 429/418 backoff and row parsing, same status as
+before. **The operator's local fetch is what verifies both**, whichever
+`--provider` is used.
 
-The failure path is known-good: a blocked host aborts loudly
-(`Binance returned 403 ... Host not in allowlist`) with no silent fallback.
+The failure path is known-good for both, and now carries more than a bare
+message: a blocked host, a bad HTTP status, or a raw network/TLS failure all
+throw with the request URL and the full error `cause` chain attached
+(DECISIONS §22) — `fetch-data.ts`'s top-level handler prints all of it via
+`formatErrorChain`, not just `err.message`.
 
 **No backtest has ever run, so no strategy result of any kind exists. No claim
 about profitability has been made and none should be inferred.**
 
 ## What is deliberately NOT built
 
+- **DexPaprika's pool-discovery/selection integration** — the provider client
+  itself is built (`src/data/providers/dexpaprika.ts`) but is not wired into
+  `fetch-data.ts`. Kept as a working alternate behind `CandleProvider` in case
+  GeckoTerminal's free tier proves too tight; its own rate limit is unresolved
+  and documented as such (DECISIONS §21).
+- **A `(token, interval, timestamp, provider)` cache key** — the cache still
+  keys on `(token, interval, timestamp)` only, so switching `--provider` for an
+  already-fetched symbol without changing `--db` silently blends rows from two
+  quote assets. Flagged with a runtime warning in `fetch-data.ts` and in
+  DECISIONS §18 rather than fixed with a schema migration not otherwise asked
+  for.
 - **Tier B / memecoins** — deferred; DECISIONS §3. `TierBSafetyProvider` throws
   `NotImplementedError` and `tier: B` is rejected at config load. Two independent
   guards. Revisit only if Tier A proves out and the operator decides to pay for
   survivorship-bias-free historical data.
-- **GeckoTerminal provider** — the `CandleProvider` interface is ready; Binance is
-  the primary path.
 - **Birdeye** — skipped; free tier too thin, and unnecessary once Tier B was
   deferred.
 - **Dashboard** (SPEC §14) — not started. Comes after a backtest exists.

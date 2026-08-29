@@ -39,3 +39,8 @@ node_modules/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local Claude Code state — not project source. Anchored per the §15 rule:
+# root-only directories get a leading slash so a same-named nested dir (there
+# isn't one today, but the data/ bug started exactly this way) is never caught.
+/.claude/

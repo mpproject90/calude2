@@ -374,3 +374,215 @@ The container is also **ephemeral and can be reclaimed without warning**.
 Therefore: commit and push after every completed step, push before answering any
 question, and commit work-in-progress to a branch rather than leaving it
 uncommitted. A step that is built but unpushed does not exist.
+
+## 18. Data provider switch: GeckoTerminal replaces Binance as default
+
+**Finding.** `api.binance.com` is unreachable from the operator's connection —
+a TLS handshake fails with a certificate-for-the-wrong-domain error
+(`SEC_E_WRONG_PRINCIPAL`) specific to that host, while other HTTPS hosts
+(`api.github.com`) succeed over the identical stack. Consistent with an
+ISP-level domain block, common for exchange domains from this operator's
+region. **This is not a code defect** and nothing in §14's Binance provider is
+being changed to work around it.
+
+**Rejected:** routing the data path through a VPN. Paper trading (phase 2) runs
+continuously for weeks; a VPN drop becomes a silent data gap for however long
+it takes to notice, which is a worse failure mode than switching providers.
+
+**Decision:** `GeckoTerminalCandleProvider` (`src/data/providers/geckoterminal.ts`)
+becomes the DEFAULT for `npm run data:fetch`. Uses the free, KEYLESS surface at
+`api.geckoterminal.com/api/v2` — deliberately not `api.coingecko.com/api/v3/onchain`,
+which is a different host requiring a CoinGecko Pro key with its own (paid-tier)
+rate limits and an explicit 6-months-on-Basic-plan historical cutoff that does
+not apply to the free surface. Confirmed from documentation: 30 requests/min,
+no key. Chosen over DexPaprika (§21) because its rate limit is confirmed and
+uncontradicted, which matters more for a weeks-long unattended run than
+DexPaprika's finer native interval.
+
+**Binance is retained**, unchanged, as `--provider binance` (`src/cli/fetch-data.ts`).
+It is not regionally blocked for everyone, and its provider, tests and the
+JUP/USDT ÷ SOL/USDT synthesis path (§6) all still work — this is a default
+change, not a deprecation.
+
+**The upside beyond working around a block:** GeckoTerminal (and DexPaprika,
+§21) index a pool's own trades directly, so requesting a JUP/SOL pool's OHLCV
+returns REAL high/low, not the synthesized BOUNDS §6 describes. Pulling
+`currency=token&token=base` for a JUP(base)/SOL(quote) pool returns exactly the
+JUP/SOL series the strategy needs, with no ratio math and no widening. §6's
+high/low-bounds problem and the "MFI confirmation-only" caveat it produced do
+not apply to data fetched this way — see §23 for what replaces them.
+
+**Never made a real request**, same status Binance carried until the
+operator's first local run (§14): every test in `test/data.test.ts` runs
+against a documented MODEL of the response shape (JSON:API-style `{ data: {
+attributes: { ohlcv_list } } }` for candles, `{ data: [...] }` with
+`relationships.base_token`/`quote_token`/`dex` for pool search). If the real
+shape differs, every parse failure throws with the raw response body attached
+as the error's `cause`, and `onRawSample` captures one verbatim OHLCV response
+and one verbatim pool-search response per run — same discipline as Binance's
+raw-sample dump, extended to the new endpoints.
+
+**Known cache-collision caveat, not fixed here:** `CandleRepository` caches by
+`(token, interval, timestamp)` only (§ repository.ts) — it does not record
+which provider or quote asset produced a row. Fetching `JUP` via GeckoTerminal
+(JUP/SOL) and later via Binance (JUP/USDT) into the same `--db` path will
+silently blend rows from two different quote assets, latest write wins. Not
+fixed with a schema change here because it wasn't asked for and adds migration
+risk for a problem the CLI now warns about at runtime instead: use a fresh
+`--db` path when switching providers for a symbol already fetched. Revisit
+with a proper `(token, interval, timestamp, provider)` key if this becomes a
+real operational hazard rather than a one-line warning.
+
+## 19. Pool selection: volume-weighted dominance, migration surfaced not resolved
+
+A token can trade on more than one pool against SOL (Raydium, Orca, Meteora,
+...), and which pool is dominant can shift partway through the window being
+fetched. Two options were rejected before landing on the one below:
+
+- Picking "whatever has the most liquidity right now" and pulling its full
+  history. Wrong whenever that pool didn't exist, or was thin, for part of the
+  window — exactly the kind of assumption §11 says to fail closed on instead.
+- Silently splicing multiple pools into one continuous series. This is the
+  same failure mode §15/gaps.ts already refuses for missing bars: a stitched
+  series is indistinguishable downstream from a real one, but isn't one.
+
+**Decision** (`src/data/poolSelection.ts`, `selectDominantPool`): discover every
+candidate pool via `GeckoTerminalCandleProvider.searchPools`, fetch each
+candidate's own OHLCV over the window, and use ONLY the single pool with the
+highest total traded volume as the series for that token. Wherever the winning
+pool has no bars, the result is a genuine gap via the existing `CandleGap`
+machinery — never backfilled from a different pool. If the LOCALLY dominant
+pool (bar by bar) changed at least once, that is reported to the operator as a
+fact (`migrated: true`, plus the `dominancePeriods` it shifted across) and
+`fetch-data.ts` prints it — never resolved automatically.
+
+**Deviation from "liquidity" as literally specified:** the free GeckoTerminal
+and DexPaprika surfaces expose a pool's CURRENT reserve/liquidity
+(`reserve_in_usd`) but no historical liquidity time series, so "time-weighted
+liquidity" is not obtainable without a paid data source. TRADED VOLUME per bar
+is used as the dominance signal instead — available historically (every OHLCV
+bar carries it) and arguably a more direct measure of where real price
+discovery happened than TVL, which can be parked capital rather than activity.
+Flagged explicitly rather than silently relabelling liquidity as volume.
+Current `reserve_in_usd` is still captured per candidate and printed, useful as
+a snapshot and for `costFloor.ts`'s `poolLiquiditySol` going forward, just not
+usable for this historical selection.
+
+## 20. SOL/USD reference retained; relative-strength filter now exact
+
+Pulling JUP/SOL directly (§18) raised the question of whether the SOL-relative
+strength filter (§5) becomes redundant, since a JUP/SOL series already nets out
+SOL exposure by construction. **It does not.** Checked every consumer of a SOL
+series in the filter stack:
+
+- `regime.ts` needs SOL's own USD-denominated trend (price vs. its moving
+  average) — this has nothing to do with any token and cannot be derived from
+  a JUP/SOL series at all.
+- `relativeStrength.ts` still logs `tokenReturn` and `solReturn` SEPARATELY on
+  every evaluation specifically so beta can be estimated later (§5) — that
+  requirement survives switching providers.
+
+**Decision:** an independent SOL/USD reference is still fetched every run — via
+a SOL/USDC pool discovered and dominance-selected the same way as the token's
+own pool (§19), using USDC's canonical Solana mint as the reference asset.
+
+**What did change:** the filter's PASS/FAIL formula. It was
+`tokenReturn - solReturn <= -threshold`, a subtractive approximation of
+relative performance. The JUP/SOL pool's own return over the lookback window is
+now available for free and is the EXACT figure —
+`(1+tokenReturn)/(1+solReturn) - 1` — so `relativeStrength.ts` was changed to
+compute it that way instead. The two formulas agree exactly when `solReturn` is
+0 and diverge more as SOL's own move grows; the worked examples in §5 (built
+under the old formula) are left as-is per the "append, not rewrite" rule, and
+`test/filters.test.ts`'s SOL -12%/token -13% case now asserts the exact ratio
+value rather than the old -0.01 approximation.
+
+## 21. DexPaprika: alternate stub, rate limit deliberately left unresolved
+
+`src/data/providers/dexpaprika.ts` implements the same `CandleProvider`
+interface against `GET /networks/{network}/pools/{pool}/ohlcv` — cheap to add
+alongside GeckoTerminal's client since the shapes are similar (real per-pool
+OHLC, JSON body, injectable `fetchFn`) — but is **not wired into
+`fetch-data.ts`'s pool-discovery/selection flow**. It exists so a working
+alternate is available behind the interface if GeckoTerminal's free tier
+proves too tight over a multi-week paper-trading run, without having to design
+it from scratch under time pressure then.
+
+**Rate limit is UNRESOLVED, on purpose.** DexPaprika's own documentation
+contradicts itself: the API-reference page states 50,000 credits/month and 15
+requests/min; the marketing page states 200,000 requests/month and 10
+concurrent SSE streams. This was not chased further by reading more
+documentation — resolving it needs an empirical check against the live API,
+and since this provider is not primary, that check was not worth doing now.
+The provider's throttle uses the more conservative figure (15/min) as an
+unverified placeholder. Do not treat it as a real budget without checking it
+against the live API first.
+
+Also unresolved for the same reason: whether the OHLCV response returns price
+in the pool's native quote-asset terms by default (assumed, since no
+`currency`-style parameter is documented) — untested against the real API,
+same status every provider carries before its first real request (§14, §18).
+
+Solana's `4h` interval, which this project otherwise uses throughout, is not
+offered by this API (`1h`/`6h`/`12h` are); `supports('4h')` returns `false`
+rather than silently approximating it via aggregation.
+
+## 22. Fail-loud fetch errors: status, URL and the full cause chain
+
+**Bug found this session, and it cost a debugging round.** `fetch-data.ts`'s
+top-level `catch` printed only `err instanceof Error ? err.message : String(err)`.
+Node's `fetch` reports a network/TLS/DNS failure as `TypeError: fetch failed`
+— a message that is true but useless — with the actual reason (a
+certificate-for-the-wrong-domain error, in the incident that prompted this)
+reachable only via `err.cause`. The top-level catch never looked there, so the
+terminal output was `FAILED: fetch failed` with no status, no URL, and no hint
+of what actually broke.
+
+**Decision, two parts:**
+
+- `src/util/errorChain.ts` (`formatErrorChain`) walks an error's full `cause`
+  chain, not just its outermost message, and includes each `Error`'s `code`
+  (e.g. `ECONNREFUSED`) when present. `fetch-data.ts`'s top-level catch uses it
+  instead of printing `err.message` alone.
+- Every provider's raw `fetchFn` call (`BinanceCandleProvider`,
+  `GeckoTerminalCandleProvider`, `DexPaprikaCandleProvider`) is now wrapped in
+  its own `try`/`catch` that re-throws as that provider's own error type with
+  the request URL in the message and the original error attached as `cause` —
+  so even a bare network throw, before any HTTP status exists to report,
+  carries the URL and the full chain by the time it reaches the top level.
+
+`BinanceProviderError` gained an `options?: { cause?: unknown }` constructor
+parameter (standard `Error` cause support) to carry this; it previously only
+accepted a message string.
+
+## 23. Wick-to-body / ATR-outlier diagnostic replaces range-widening for real pool data
+
+`rangeWideningRatio()` (§6, `synthesize.ts`) quantified a SPECIFIC, known
+distortion: synthesizing JUP/SOL from two USDT legs produces high/low BOUNDS,
+not observations. Pulling a pool's own OHLCV directly (§18) removes that
+distortion entirely — the check is moot on that path — but does not mean real
+pool data is clean. A thin pool's high/low can be a single wash trade or one
+oversized swap rather than a representative price, which is real data, not a
+synthesis artifact, so `rangeWideningRatio` cannot catch it (there is no
+"widening" to measure — the high/low ARE observations, just possibly
+unrepresentative ones).
+
+**Decision:** `src/data/wickDiagnostics.ts` (`computeWickDiagnostics`), run by
+`fetch-data.ts` on the selected token/SOL series, reports two signals instead:
+
+- **Wick-to-body ratio distribution** (p50/p90/p99/max) —
+  `(upperWick + lowerWick) / |close - open|` per bar. A zero-body bar with real
+  range reports `Infinity` deliberately (all range, no direction — that IS the
+  signal) rather than being clipped out of the distribution.
+- **ATR-outlier count** — bars where the high or low sits more than 3× ATR(14)
+  outside `[min(open,close), max(open,close)]`. Reuses `computeAtr` from
+  `indicators/atr.ts` directly, so it is judged against the same ATR the
+  strategy itself would compute; bars still in ATR's warm-up (§10) are
+  reported separately and excluded from the outlier count rather than
+  misjudged.
+
+This is a report for the operator, the same role range-widening played — it
+never blocks anything. A high outlier count means MFI's typical price and
+ATR's true range on this token are eating single-swap noise, and is grounds to
+scrutinize the token/pool before trusting either, same conclusion as a bad
+range-widening number, different underlying cause.
