@@ -15,6 +15,7 @@
     "config:check": "tsx src/cli/config-check.ts",
     "data:fetch": "tsx src/cli/fetch-data.ts",
     "data:screen": "tsx src/cli/screen.ts",
+    "data:cex-study": "tsx src/cli/cex-study.ts",
     "backtest": "tsx src/cli/backtest.ts"
   },
   "dependencies": {
