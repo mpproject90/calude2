@@ -48,47 +48,79 @@ tested apparatus that produced a trustworthy negative result and may be
 reused for a different hypothesis later. Removed from the live/paper
 ENTRY path only, once the pivot below is built.
 
-## PHASE 2 PIVOT — scope reported, awaiting operator confirmation (not yet built)
+## PHASE 2 PIVOT — entry path, exit path, cost preview BUILT (DECISIONS §39/§40)
 
 **New shape: manual entry, automated exit.** The operator pastes a
 contract address and sets a limit buy price; the bot fills it and manages
-the exit automatically. No indicator-driven entry. Judgment on token and
-entry price stays with the operator; the bot supplies execution
-discipline. Reported scope, nothing below is built yet:
+the exit automatically. No indicator-driven entry. Scope confirmed by the
+operator, then built:
 
-- **Entry**: per-token config with a target limit price and an amount.
-  Poll price; buy when it reaches or crosses the limit. The position-size
-  cap against pool liquidity and the cost-floor check both still apply.
-  Pool resolution and pinning (DECISIONS §29/§30) stay as-is.
-- **Exit**: configurable take-profit ladder (sell X% at +N%, further
-  tranches at higher levels), trailing stop after the first tranche, hard
-  stop-loss, time exit — reusing the existing exit primitives
-  (`rules/exit.ts`), wired to a price-triggered position instead of an
-  indicator-triggered one.
+- **Entry** (`src/rules/limitEntry.ts`, `evaluateLimitEntry`) — standard
+  limit-buy semantics: fills when observed price is at or below the
+  configured limit. Trigger detection only, no slippage modelling (that's
+  the execution layer's job, not built yet). The position-size cap against
+  pool liquidity and the cost-floor filter are UNCHANGED, still apply —
+  this only replaces the entry trigger. Pool resolution/pinning
+  (DECISIONS §29/§30) untouched.
+- **Exit** (`src/rules/ladderExit.ts`, `evaluateLadderExit`) — a PARALLEL
+  implementation to `evaluateExit`, not a wrapper (partial fills and
+  wall-clock time don't fit the old single-position/candle-index shape).
+  Priority: hard stop-loss (all remaining) → trailing stop (arms only
+  after the first tranche fills, all remaining) → next unfilled tranche
+  only (realistic — separate resting orders at different levels) → time
+  (wall-clock, all remaining). `stopLossPriceFor` reused directly. A real
+  bug (trailing armed one evaluation late) was found and fixed via a test
+  that filled a tranche and immediately checked arming state.
+- **Config schema** — `tpTrancheSchema`, `ladderExitSchema`,
+  `manualPositionSchema` (no `tier` — token pick is manual now),
+  `configSchema.positions[]`. `tokens[]` relaxed to optional/default([])
+  — a live deployment can run on `positions[]` alone; a config needs at
+  least one of the two.
 - **Removed from the live path, not deleted from the codebase**:
   prior-overbought, RSI cross-up, MFI confirmation, relative-strength,
-  regime filter. Indicators/filters/funnel/backtest engine all stay
-  intact and tested.
-- **New, not yet built anywhere**: expected round-trip cost PER TRANCHE,
-  shown at config-validation time — three tranches means three exits,
-  each paying DEX fee + priority fee + slippage, and costs were 44% of
-  gross P&L in the phase-1 backtest (DECISIONS §36). A tranche whose
-  expected proceeds don't clear its own cost by a sensible margin should
-  be rejected at config validation with the numbers shown, not discovered
-  after the fact.
-- **Then phase 2 proper (spec step 8)**: paper trading, same code path as
-  live with execution swapped for a simulator with modelled slippage.
-  Purpose is different from phase 1's backtesting — this validates the
-  EXECUTION LAYER (does the stop fire at the right price, does position
-  state stay consistent, does the price feed hold up over weeks, does a
-  simulated failure get handled), not a strategy.
-- **Not built yet, and gated on explicit operator approval**: the live
-  execution layer (spec step 10), after paper trading runs and is
-  reviewed. Same hard rule as always — nothing here may place a real trade
-  yet.
+  regime filter. `src/indicators/`, `src/filters/{relativeStrength,
+  regime}.ts`, `src/backtest/funnel.ts`, `src/backtest/engine.ts` all
+  stay intact and tested — the new modules simply don't call any of it.
+- **Cost preview** (`src/filters/ladderCostPreview.ts`,
+  `computeLadderCostPreview`) — per tranche: net floor check (≥5% net
+  after that tranche's own exit costs, default configurable) and
+  fixed-cost-ratio check (fixed fee ≤20% of that tranche's gross
+  proceeds, default configurable) — both numbers ALWAYS reported, pass or
+  fail. Plus a whole-ladder-vs-single-exit comparison: total ladder exit
+  cost as % of position vs. one exit at the blended average price for the
+  SAME total sold amount — "the price of laddering." Modelling scope
+  stated explicitly: covers only each tranche's own EXIT leg (not the
+  shared entry cost), and the project's existing LINEAR slippage model
+  means the reported laddering premium is driven almost entirely by extra
+  fixed fees per transaction, not slippage — a lower bound on the true
+  cost of laddering, documented as such.
 
-**Awaiting operator confirmation of this scope before any of it is
-built.**
+  **A real bug found by manually running `config:check` against an
+  example config, not just by unit tests**: the single-exit comparison
+  was sizing itself to the FULL position even when the ladder only sells
+  a partial amount, producing a nonsensical NEGATIVE "premium for
+  laddering." Fixed and covered by a regression test.
+
+  Wired into `npm run config:check` (not into zod parsing — zod throws on
+  the first issue, which would prevent showing a failing tranche's
+  numbers at all). Prints every position's full per-tranche table
+  unconditionally, then exits non-zero if any tranche fails either check
+  — this is the current enforcement point, since no live/paper loader
+  exists yet to enforce it at startup.
+
+- **`config/default.yaml`** documents the pivot in its header and adds a
+  commented-out example `positions[]` entry plus `positions: []`.
+
+**322 tests passing, typecheck clean.** Verified against `main` by clean
+clone and tree-versus-index diff.
+
+**Not built, per operator direction — stop here and report**: paper
+trading (spec step 8, same code path with execution swapped for a
+simulator; validates the EXECUTION layer, not a strategy — does the stop
+fire at the right price, does position state stay consistent across a
+restart, does the price feed hold up over weeks, does a simulated failure
+get handled) and the live execution layer (spec step 10, gated on
+explicit operator approval after paper trading runs and is reviewed).
 
 ### Commands the operator runs (locally)
 
@@ -200,8 +232,8 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Data | `src/data/` | providers, repository + fetch log, validation, gap detection, pool selection, wick/ATR diagnostics |
 | Providers | `src/data/providers/` | GeckoTerminal (default), Binance (alternate), DexPaprika (stub, not wired in) |
 | Indicators | `src/indicators/` | RSI, MFI, ATR; warm-up gating; `{value, reliable, reason}` |
-| Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates |
-| Rules | `src/rules/` | entry conditions, intrabar exits, portfolio limits |
+| Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates, ladder cost preview (§40) |
+| Rules | `src/rules/` | phase 1 (preserved, not live): entry conditions, intrabar exits, portfolio limits. Phase 2 (live path, §39): limit entry, ladder exit |
 | Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
 | CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study + declustering — §33–§35), `data:cex-backtest` (baseline backtest on the CEX-pooled series — §36), `backtest` |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
@@ -770,10 +802,10 @@ zero (see above):
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 260
-cases across 10 files: `data` 80, `backtest` 36, `rules` 45, `filters` 29,
-`config` 17, `indicators` 23, `repo-hygiene` 10, `amount` 8, `logger` 8, `db`
-4. `data` grew to 80 with the schema-v2 pool-coexistence tests (§29–§30);
-`backtest` grew to 36 with the entry-funnel tests (§32); `indicators` and
-`config` grew with the warm-up-multiplier and pool-pinning schema changes
-(§28–§30).
+Counts are **test cases**, as reported by vitest — never assertions. 322
+cases across 10 files: `data` 91, `rules` 58, `backtest` 57, `filters` 38,
+`config` 25, `indicators` 23, `repo-hygiene` 10, `amount` 8, `logger` 8, `db`
+4. Phase 2's pivot (§39/§40) grew `rules` (limit entry + ladder exit),
+`filters` (ladder cost preview), and `config` (tranche/ladder/manual-position
+schema) the most recently; `backtest` grew earlier with the CEX study's
+decluster/exit-replay diagnostics (§35, §38).

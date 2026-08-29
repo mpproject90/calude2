@@ -1661,3 +1661,169 @@ section** — `replayExit` is a standalone diagnostic module with no schema
 field, not a modification to `rules/exit.ts` or `config/default.yaml`.
 Decision on whether this baseline stops the strategy or proceeds to a
 sweep is the operator's, not made here.
+
+## 39. Phase 2 pivot: manual entry, automated exit — the entry and exit paths
+
+**§27–§38's rejection of RSI/MFI mean-reversion entry (see the top of this
+file) ends phase 1's automated-signal approach.** Operator direction: pivot
+to manual entry, automated exit — the operator picks the token and a limit
+price by hand; the bot fills it and manages a configurable multi-tranche
+take-profit ladder, trailing stop, hard stop, and time exit, with no
+indicator deciding entry. Scope confirmed before building (prior turn);
+this section records what was actually built.
+
+**Removed from the live path, NOT from the codebase.** Prior-overbought,
+RSI cross-up, MFI confirmation, relative-strength, regime filter —
+`src/indicators/`, `src/filters/{relativeStrength,regime}.ts`,
+`src/backtest/funnel.ts`, `src/backtest/engine.ts` — are untouched and
+still fully tested. Nothing was deleted; the new price-triggered modules
+below simply don't call any of it. "Removal" here means the live/paper
+path (once built) calls the new modules, not that old code was excised.
+
+**Config schema** (`src/config/schema.ts`): `tpTrancheSchema` (targetGainPct,
+sellPct — of the ORIGINAL position, not the remainder), `ladderExitSchema`
+(tranches, trailing, stopLossPct, wall-clock `timeExitMinutes` — there is
+no candle timeframe driving this position, so time is wall-clock, not
+candle count), `manualPositionSchema` (address, symbol, buyAmountSol,
+limitPrice, optional pinnedPoolAddress, ladder, limits — deliberately no
+`tier`, since that gate filtered which tokens an automated scanner would
+consider and does not apply once the operator has picked the token by
+hand). `configSchema.tokens` relaxed from required-min-1 to
+`default([])` — a live deployment can now run on `positions[]` alone — with
+a new structural check that at least one of `tokens`/`positions` is
+non-empty (a config with neither has nothing to do).
+
+**Entry** (`src/rules/limitEntry.ts`): `evaluateLimitEntry(currentPrice,
+limitPrice)` — standard limit-buy semantics, fill when observed price is at
+or below the limit. Returns the OBSERVED price as the trigger reference,
+not the stale limit (a real fill could be better than the limit if price
+gapped through it). Trigger detection only; slippage-adjusted execution is
+the execution layer's job (paper simulator or live), not built here.
+Per operator direction, the position-size cap against pool liquidity and
+the cost-floor filter (§6.3/§6.4) are UNCHANGED and still apply — this
+section only replaces the entry TRIGGER, not the checks that gate whether
+a triggered entry is actually sized/allowed.
+
+**Exit** (`src/rules/ladderExit.ts`): `evaluateLadderExit` — a PARALLEL
+implementation to `evaluateExit`, not a wrapper around it. The position
+shape (partial fills across tranches, wall-clock time instead of candle
+count, no RSI) is different enough that forcing it through the old
+single-position `OpenPosition` shape would be more contortion than the
+code it would save. `stopLossPriceFor` (the one piece with no behavioural
+difference) is reused directly from `rules/exit.ts`.
+
+Priority, highest first — mirrors `rules/exit.ts`'s own stated priority,
+adapted for partial fills:
+1. **Stop-loss**, intrabar (window low vs. stop price), exits the ENTIRE
+   remaining position.
+2. **Trailing stop**, intrabar, arms only once the FIRST tranche has
+   filled (not a separate `activateAtPct` — tied to the ladder's own first
+   tranche completing), exits the ENTIRE remaining position.
+3. **Take-profit**, intrabar (window high vs. next tranche's target),
+   fires the NEXT UNFILLED tranche only, in ascending order. If one price
+   move clears more than one tranche's target inside a single window, only
+   the nearer one fires — a realistic simplification, not an
+   approximation: each tranche is a separate resting order at a different
+   level, and price passes through the lower one first. The next
+   evaluation picks up the following tranche.
+4. **Time**, wall-clock elapsed since entry, exits the ENTIRE remaining
+   position at the window's `close` with no slippage adjustment — matches
+   `rules/exit.ts`'s own time exit (not an adverse intrabar trigger, just
+   "nothing else happened").
+
+Same conservative intrabar ordering assumption as `evaluateIntrabarStops`:
+stop-loss is checked against the window's LOW before a take-profit target
+is checked against the window's HIGH, in case both are touched in one
+window — same "assume the adverse sequence" reasoning, unchanged.
+
+**A real bug found and fixed while testing, not by inspection**:
+`trailingArmed` was computed once at the top of the function from the
+PRE-fill tranche count, and the take-profit branch's returned `nextState`
+didn't recompute it after incrementing the fill count — so trailing armed
+one evaluation LATE instead of on the very evaluation the first tranche
+filled. A test asserting `trailingArmed === true` immediately after a
+tranche-1 fill caught it (`arms and fires the trailing stop once the first
+tranche has filled`, `test/rules.test.ts`). Fixed by re-deriving
+`trailingArmed` from the post-fill count inside that branch specifically.
+
+All 58 new rule tests pass, hand-computed where numeric (tranche sizing
+via `TokenAmount.mulBps` against the ORIGINAL position, not the remainder;
+stop/trailing/take-profit fill prices).
+
+## 40. Phase 2 pivot: the take-profit ladder cost preview
+
+**Operator direction, given as-is, not re-derived**: two config-time
+economic checks per tranche — (1) an absolute net floor, default 5%, "a
+tranche must return at least this much net on the capital it exits"; (2) a
+minimum-tranche-size check, default 20%, "fixed costs must not exceed this
+share of the tranche's expected gross proceeds" (priority fee + Jito tip
+are roughly constant per transaction regardless of size, so a small
+tranche can pay more in fixed cost than it's worth). Both configurable, in
+`ladderExitSchema` as `minNetFloorPct`/`maxFixedCostPctOfProceeds`. Report
+BOTH numbers per tranche whether or not they pass — a ladder sitting close
+to a floor is worth knowing about even when it clears — plus a
+whole-ladder-vs-single-exit comparison: total expected cost across all
+tranches as % of position, versus one exit at the blended average price —
+"the price of laddering."
+
+**Built `computeLadderCostPreview`** (`src/filters/ladderCostPreview.ts`).
+Modelling choices stated explicitly, not left implicit:
+- **Scope of "cost" is the EXIT leg only**, per tranche — DEX fee +
+  slippage + one transaction's fixed fee (priority + Jito), matching the
+  operator's own framing ("each exit paying DEX fee, priority fee and
+  slippage"). The ENTRY leg is paid once, is identical regardless of how
+  the exit is laddered, and is not apportioned into per-tranche numbers —
+  it would only add a constant that cancels out of every comparison this
+  preview makes.
+- **Linear slippage model caveat, stated because it changes what the
+  "premium for laddering" number means**: `estimateRoundTripCost`
+  (`costFloor.ts`) and this module both model price impact as
+  `positionValue / poolLiquidity` — LINEAR. Under a strictly linear model,
+  splitting one sell into several smaller ones does not change the
+  AGGREGATE slippage cost — verified in a test that the ladder's summed
+  dex-fee-plus-slippage exactly equals the single-exit comparison's. Only
+  the FIXED per-transaction fee scales with transaction count. So the
+  reported laddering premium is driven almost entirely by the extra fixed
+  fees, and is a LOWER BOUND on the true cost of laddering — a real
+  (convex) market would likely show additional per-tranche slippage
+  benefit or cost this linear model cannot capture either way.
+
+**A real bug found by manual verification, not caught by the unit tests
+that existed at the time**: the whole-ladder-vs-single-exit comparison
+originally sized the single-exit side to the FULL position even when the
+ladder itself only sells a PARTIAL amount (a held runner). Running
+`config:check` against a real example ladder (0.1%/50% tranches) produced
+a NEGATIVE "premium for laddering" (-0.75%) — the ladder looked cheaper
+only because it sold less of the position, not because laddering was
+actually cheaper. Fixed by sizing the single-exit comparison to the SAME
+total sold amount the ladder actually sells (`sumSellPct`% of the
+position); a held remainder now correctly contributes to neither number.
+Caught before being trusted specifically BECAUSE the CLI was run against a
+real config and the output read, not just because the unit tests passed —
+the tests that existed before the fix did not cover a partial-sellPct
+ladder. A regression test was added
+(`the laddering premium is never negative for a ladder that sells the same
+total as the single exit`).
+
+**Wired into `npm run config:check`** (`src/cli/config-check.ts`), not into
+zod's schema validation. Deliberate: the economic checks need to be
+REPORTED even when they FAIL ("report both numbers... whether or not they
+pass"), but zod's `superRefine` throws on the first collected issue before
+a caller can inspect a parsed, passing-elsewhere config — there is no way
+to "parse and get the numbers back" from a config that zod has rejected.
+So `configSchema` validates STRUCTURE only (tranche ordering, sellPct sum
+≤ 100%, positive prices); `config:check` runs `computeLadderCostPreview`
+on every position AFTER a successful structural parse, prints every
+tranche's full numbers unconditionally, and exits non-zero if any tranche
+fails either check — the enforcement point, with the numbers always shown
+first. `loadConfig` itself does not enforce this (would reintroduce the
+same throw-before-report problem for any future programmatic caller);
+whichever code eventually starts live/paper trading will need to call
+`computeLadderCostPreview` and fail closed on it too, per the project's
+fail-closed hard rule — not built yet, since paper trading itself is not
+built yet (see STATUS.md).
+
+Manually verified against two real example configs (a failing ladder and a
+passing one) before committing, in addition to the 12 hand-computed unit
+tests — this is what caught the sold-amount bug above; the unit tests
+alone had not exercised a partial-sellPct case yet.
