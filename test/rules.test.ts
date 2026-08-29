@@ -6,6 +6,7 @@ import {
   crossedUpThrough, crossedDownThrough, wasOverboughtWithin, hasBullishDivergence,
 } from '../src/rules/conditions.js';
 import { evaluateEntry } from '../src/rules/entry.js';
+import { evaluateLimitEntry } from '../src/rules/limitEntry.js';
 import {
   evaluateExit, evaluateIntrabarStops, stopLossPriceFor, timeExitIndexFor,
   type OpenPosition,
@@ -406,5 +407,23 @@ describe('portfolio limits', () => {
                       realizedPnlSol: sol('0.1') }];
     const r = checkPortfolioLimits({ ...base, state: state({ recentClosed: closed }) });
     expect(failures(r).some((m) => /cooling down/.test(m))).toBe(false);
+  });
+});
+
+describe('limit entry (DECISIONS §39) — price-triggered, no indicators', () => {
+  it('fills when price is already at or below the limit', () => {
+    expect(evaluateLimitEntry(0.8, 0.8)).toEqual({ fill: true, referencePrice: 0.8 });
+    expect(evaluateLimitEntry(0.75, 0.8)).toEqual({ fill: true, referencePrice: 0.75 });
+  });
+
+  it('does not fill while price is above the limit', () => {
+    expect(evaluateLimitEntry(0.81, 0.8)).toEqual({ fill: false, referencePrice: null });
+  });
+
+  it('the fill price is the observed price, not the limit itself', () => {
+    // price gapped well below the limit — a real fill would be at the better price, not the stale limit
+    const r = evaluateLimitEntry(0.5, 0.8);
+    expect(r.fill).toBe(true);
+    expect(r.referencePrice).toBe(0.5);
   });
 });
