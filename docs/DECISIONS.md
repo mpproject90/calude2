@@ -2140,8 +2140,63 @@ matter how long the soak runs. **Not fixed silently — this is a real
 policy decision (how position size gets bounded, i.e. a risk control, not
 a data-source swap) reported to the operator instead, per this project's
 established discipline of reporting rather than deciding matters like
-this alone.** See STATUS.md for the options put to the operator and
-whichever one is chosen.
+this alone.**
+
+**Operator's choice: derive an implied liquidity bound from Jupiter's own
+measured `priceImpactPct`**, not a manual figure and not a new liquidity
+API. Implemented in `runner.ts`'s `impliedPoolLiquiditySol` — the
+project's existing linear-impact assumption
+(`impactPct ≈ tradeSize / liquidity`, already used in `costFloor.ts` and
+`ladderCostPreview.ts`) inverted with REAL measured impact for the exact
+configured `buyAmountSol`, computed from the SAME quote already fetched
+for pricing — no new request. `tryEnter` now computes this once and
+threads it into `evaluatePositionSize`, `evaluateCostFloor`, and
+`simulateEntryFill` uniformly, falling back to `deps.poolLiquiditySol`
+(still always `null` in this delivery) only when the observation carries
+no real impact figure at all — fail-closed is preserved exactly where it
+should be.
+
+**A genuine algebraic consequence, not a coincidence, worth recording**:
+because the cap check (`requestedSol > liquidity *
+maxPctOfPoolLiquidity/100`) is fed a liquidity figure back-derived from
+that SAME requested size's own measured impact, the two formulas cancel
+and the cap collapses into "reject if this trade's real measured price
+impact (in percent-points) exceeds `maxPctOfPoolLiquidity`" — a more
+direct expression of the same underlying risk concern (bound MY OWN price
+impact) than the original "don't exceed N% of the pool" framing, now that
+real per-trade impact data exists to check it against directly.
+
+**Near-zero impact (a pool far deeper than this trade needs to move it)
+is treated as effectively unconstrained** via a large sentinel
+(1,000,000 SOL) rather than dividing by ~zero — confirmed live: a real
+Jupiter quote for 0.1 SOL against this pool measured `0.0000%` impact,
+hit the sentinel path, and the entry filled at full requested size with
+no cap binding.
+
+**A real units bug caught before this shipped, not after**: Jupiter's
+`priceImpactPct` is a FRACTION (Jupiter's own convention — `0.0001` =
+0.01%), which `JupiterQuoteFeed`/`PriceObservation` deliberately pass
+through unconverted. `impliedPoolLiquiditySol`'s first draft divided that
+value by 100 a SECOND time (treating it as if it were already a percent),
+which would have overestimated implied liquidity by 100x — a materially
+less conservative cap than intended, silently. Caught by re-deriving the
+formula by hand while writing this entry, before any test run depended on
+the wrong number; fixed by removing the erroneous division and instead
+converting fraction→percent exactly once, at the one call site that
+actually needs percent units (`simulateEntryFill`'s `realPriceImpactPct`,
+to match `slippagePct`'s pre-existing percent convention) — documented
+inline at both the function and the call site so the unit of every value
+crossing that boundary is explicit, not inferred.
+
+**Verified end-to-end against the live endpoint** after the fix: a real
+quote returned 0.0000% impact, the sentinel path engaged, position-size
+and cost-floor both passed, and the entry filled at the observed price
+directly (0% synthetic markup — the earlier §41-follow-up fix and this
+one compose correctly together). This is the first entry fill this
+project's paper-trading delivery has ever produced against a live price
+feed, at any point in this project's history — every prior real-feed
+attempt was blocked by either the candle feed's blindness or this
+liquidity gate.
 
 ## Feed-reliability counters (schema v4), and moving the soak test to a Windows Scheduled Task
 

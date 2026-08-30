@@ -70,10 +70,11 @@ async function main(): Promise<void> {
     feed, store, global: cfg.global, now: () => Date.now(),
     log: (msg) => console.log(`${new Date().toISOString()} ${msg}`),
     staleAfterMs: STALE_AFTER_MS,
-    // No live pool-liquidity feed in this delivery (module header in
-    // runner.ts) — every entry/cost-floor evaluation prints its own
-    // explicit "not evaluated"/fallback line, same as the backtest CLI
-    // without --pool-liquidity-sol. Not a silent gap.
+    // No STANDALONE live pool-liquidity feed in this delivery — but
+    // runner.ts derives an implied figure per-entry from the SAME Jupiter
+    // quote already fetched for pricing (DECISIONS §41 second follow-up).
+    // This is only the fallback for a feed observation with no real
+    // priceImpactPct to derive from — should not bind in normal operation.
     poolLiquiditySol: null,
   };
 
@@ -81,7 +82,7 @@ async function main(): Promise<void> {
     `Paper trading started — ${cfg.positions.length} position(s), polling every ` +
     `${cfg.global.stopPollSeconds}s, state in ${dbPath}. Ctrl-C to stop.`,
   );
-  console.log('NOTE: poolLiquiditySol is not supplied — position-size and cost-floor checks run in their fail-closed/fallback mode for every entry (see runner.ts).');
+  console.log('NOTE: position-size/cost-floor liquidity is derived per-entry from the Jupiter quote\'s own measured price impact (DECISIONS §41) — printed on every ENTRY FILLED line.');
   for (const p of cfg.positions) {
     const alreadyOpen = store.getOpenPosition(p.symbol) !== null;
     console.log(`  ${p.symbol}: limit ${p.limitPrice}, ${p.buyAmountSol} SOL${alreadyOpen ? ' — RESUMING an open position from a prior run' : ''}`);

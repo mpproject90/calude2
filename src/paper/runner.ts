@@ -94,6 +94,47 @@ function remainingTokenRaw(open: PersistedPaperPosition, decimals: number): bigi
   return TokenAmount.fromDecimalString(tokenQty.toFixed(decimals), decimals).raw;
 }
 
+/**
+ * DECISIONS §41 second follow-up: `evaluatePositionSize`/`evaluateCostFloor`
+ * both fail closed without a `poolLiquiditySol` figure, and this delivery
+ * has no live liquidity feed — which meant NO entry could ever fill, since
+ * `deps.poolLiquiditySol` is always null. Rather than leave that gate
+ * permanently shut or add a new API call, derive an implied bound from the
+ * SAME quote already fetched for pricing: this project's existing
+ * linear-impact model (`costFloor.ts`, `ladderCostPreview.ts`) already
+ * assumes `impactPct ≈ tradeSize / liquidity`; inverting it with Jupiter's
+ * REAL measured impact for this exact trade size uses real data instead of
+ * a guess. A consequence worth being explicit about: since the cap check
+ * (`requestedSol > liquidity * maxPctOfPoolLiquidity/100`) is fed a
+ * liquidity figure back-derived from that SAME requested size's own
+ * measured impact, the cap collapses algebraically into "reject if this
+ * trade's real measured price impact exceeds `maxPctOfPoolLiquidity`" — a
+ * more direct expression of the same risk concern, not a coincidence.
+ *
+ * A near-zero measured impact (the pool is far deeper than this trade
+ * needs to move it) is treated as effectively unconstrained rather than
+ * dividing by ~zero — `UNCONSTRAINED_LIQUIDITY_SENTINEL_SOL` is large
+ * enough that no realistic manual position size would ever hit the cap
+ * from it.
+ */
+const UNCONSTRAINED_LIQUIDITY_SENTINEL_SOL = 1_000_000;
+
+/**
+ * `priceImpactFraction` is Jupiter's OWN units — a fraction (0.0001 =
+ * 0.01%), not a percent — matching `PriceObservation.priceImpactPct`
+ * exactly as the feed returns it, no conversion at this boundary. (The
+ * PERCENT-units conversion happens separately, at the `simulateEntryFill`
+ * call site below, where `EntryFillInput.realPriceImpactPct` has its own
+ * pre-existing percent convention to match `slippagePct`.)
+ */
+function impliedPoolLiquiditySol(tradeSizeSol: number, priceImpactFraction: number | undefined): number | null {
+  if (priceImpactFraction === undefined) return null;
+  if (!Number.isFinite(priceImpactFraction) || priceImpactFraction <= 1e-9) {
+    return UNCONSTRAINED_LIQUIDITY_SENTINEL_SOL;
+  }
+  return tradeSizeSol / priceImpactFraction;
+}
+
 function buildQuoteRequest(position: ManualPositionConfig, open: PersistedPaperPosition | null): QuoteRequest {
   if (open === null) {
     return {
@@ -156,17 +197,17 @@ async function tryEnter(
   const entryDecision = evaluateLimitEntry(price, position.limitPrice);
   if (!entryDecision.fill) return;
 
-  // Called UNCONDITIONALLY, unlike the backtest CLI's deliberate bypass when
-  // poolLiquiditySol is null (engine.ts's own comment: that bypass is a
-  // backtest-only accommodation for free data having no historical
-  // liquidity — "correct for live/paper" is to let this filter fail closed,
-  // which it already does on its own when poolLiquiditySol is null). Paper
-  // trading is a live-code-path validation, not backtest, so it gets the
-  // real fail-closed behavior: no liquidity figure means no entry, exactly
-  // as live would refuse to size a trade it cannot bound the slippage of.
+  // poolLiquiditySol: derived from THIS quote's own measured impact when
+  // available (see impliedPoolLiquiditySol's header comment), falling back
+  // to deps.poolLiquiditySol (always null in this delivery — no live feed)
+  // only when the observation didn't come with a real impact figure.
+  // Fail-closed is preserved exactly when it should be: a feed that can't
+  // tell us the impact still blocks the entry, same as before.
   const buyAmountSol = sol(position.buyAmountSol);
+  const poolLiquiditySol = impliedPoolLiquiditySol(buyAmountSol.toNumberUnsafe(), observation.priceImpactPct)
+    ?? deps.poolLiquiditySol;
   const sizing = evaluatePositionSize({
-    requestedSol: buyAmountSol, poolLiquiditySol: deps.poolLiquiditySol,
+    requestedSol: buyAmountSol, poolLiquiditySol,
     maxPctOfPoolLiquidity: position.limits.maxPctOfPoolLiquidity, minViableSol: sol(position.limits.minViableBuyAmountSol),
   });
   if (!sizing.pass || sizing.sizeSol === null) {
@@ -181,7 +222,7 @@ async function tryEnter(
     ? { value: 0, reliable: false as const, reason: 'invalid-input' as const }
     : { value: firstTranche.targetGainPct / 100, reliable: true as const };
   const costFloor = evaluateCostFloor({
-    expectedMove, positionValueSol: sizing.sizeSol.toNumberUnsafe(), poolLiquiditySol: deps.poolLiquiditySol,
+    expectedMove, positionValueSol: sizing.sizeSol.toNumberUnsafe(), poolLiquiditySol,
     dexFeePct: deps.global.costFloor.dexFeePct, priorityFeeSol: Number(deps.global.costFloor.priorityFeeSol),
     jitoTipSol: Number(deps.global.costFloor.jitoTipSol), minTargetToCostRatio: deps.global.costFloor.minTargetToCostRatio,
     fallbackSlippagePct: deps.global.costFloor.fallbackSlippagePct,
@@ -196,8 +237,12 @@ async function tryEnter(
   const fill = simulateEntryFill({
     midPrice: price, buyAmountSol: sizing.sizeSol, dexFeePct: deps.global.costFloor.dexFeePct,
     priorityFeeSol: Number(deps.global.costFloor.priorityFeeSol), jitoTipSol: Number(deps.global.costFloor.jitoTipSol),
-    fallbackSlippagePct: deps.global.costFloor.fallbackSlippagePct, poolLiquiditySol: deps.poolLiquiditySol,
-    ...(observation.priceImpactPct !== undefined ? { realPriceImpactPct: observation.priceImpactPct } : {}),
+    fallbackSlippagePct: deps.global.costFloor.fallbackSlippagePct, poolLiquiditySol,
+    // *100: observation.priceImpactPct is Jupiter's own fraction units
+    // (0.0001 = 0.01%); EntryFillInput.realPriceImpactPct is percent, to
+    // match slippagePct's pre-existing convention (fallbackSlippagePct: 1
+    // means "1%"). Converted here, at the boundary, not inside the feed.
+    ...(observation.priceImpactPct !== undefined ? { realPriceImpactPct: observation.priceImpactPct * 100 } : {}),
   });
 
   // Reuse openLadderPosition for the initial state (stop price etc.) rather than
@@ -220,7 +265,7 @@ async function tryEnter(
   deps.log(
     `[${position.symbol}] ENTRY FILLED at ${fill.fillPrice.toFixed(8)} (observed ${price.toFixed(8)}, ` +
     `${fill.slippagePct.toFixed(4)}% ${fill.slippageEstimated ? 'slippage, estimated' : 'impact'}), ` +
-    `size ${fill.netSizeSol.toString()} SOL`,
+    `size ${fill.netSizeSol.toString()} SOL, implied liquidity ~${poolLiquiditySol === null ? 'unknown' : poolLiquiditySol.toFixed(2)} SOL`,
   );
 }
 

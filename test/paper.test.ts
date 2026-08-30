@@ -548,7 +548,7 @@ describe('tick (DECISIONS §41, §41 follow-up) — runner integration, same rul
     expect(open.entryPrice).toBe(99);   // the quoted price itself, not 99 * (1 + fallback%)
   });
 
-  it('fails closed and skips the entry when pool liquidity is unknown', async () => {
+  it('fails closed and skips the entry when pool liquidity is unknown AND the feed has no real impact figure', async () => {
     const { db, store, logs, baseDeps } = harness();
     const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0), now: () => T0, poolLiquiditySol: null };
     await tick(testPosition(), deps);
@@ -556,6 +556,36 @@ describe('tick (DECISIONS §41, §41 follow-up) — runner integration, same rul
     expect(logs.some((l) => l.includes('ENTRY SKIPPED'))).toBe(true);
     const events = db.prepare("SELECT kind FROM paper_events WHERE kind = 'entry_skipped'").all() as { kind: string }[];
     expect(events).toHaveLength(1);
+  });
+
+  it('DECISIONS §41 second follow-up: fills even when poolLiquiditySol is null, deriving an implied bound from the real quoted impact', async () => {
+    const { store, logs, baseDeps } = harness();
+    // this is the exact regression the soak's smoke test found: deps.poolLiquiditySol
+    // is null in the real CLI (no live liquidity feed), which used to mean NO entry
+    // could ever fill — a real priceImpactPct from the feed must unblock it
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0, 0.0055), now: () => T0, poolLiquiditySol: null };
+    await tick(testPosition(), deps);
+    const open = store.getOpenPosition('JUP');
+    expect(open).not.toBeNull();
+    expect(logs.some((l) => l.includes('ENTRY FILLED') && l.includes('implied liquidity'))).toBe(true);
+    expect(logs.some((l) => l.includes('ENTRY SKIPPED'))).toBe(false);
+  });
+
+  it('treats a near-zero measured impact as effectively unconstrained rather than dividing by ~zero', async () => {
+    const { store, baseDeps } = harness();
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0, 0), now: () => T0, poolLiquiditySol: null };
+    await tick(testPosition(), deps);
+    expect(store.getOpenPosition('JUP')).not.toBeNull();   // did not throw, did not fail closed
+  });
+
+  it('still rejects a trade whose real measured impact exceeds maxPctOfPoolLiquidity, even with poolLiquiditySol null', async () => {
+    const { store, logs, baseDeps } = harness();
+    // default maxPctOfPoolLiquidity is small (schema default) — a measured
+    // impact far above it must still reject, proving this isn't a blanket bypass
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0, 50), now: () => T0, poolLiquiditySol: null };
+    await tick(testPosition(), deps);
+    expect(store.getOpenPosition('JUP')).toBeNull();
+    expect(logs.some((l) => l.includes('ENTRY SKIPPED'))).toBe(true);
   });
 
   it('skips the entry when cost-floor rejects it (target too small to clear round-trip cost)', async () => {
