@@ -36,9 +36,18 @@ it happens.
 
 ## Hard rules
 
-- **Nothing here may place a trade.** There is no execution layer. Do not build
-  one — phase 3 requires explicit operator approval after phases 1 and 2 are
-  reviewed.
+- **Nothing here may place a real trade without explicit operator
+  approval.** Phase 3's execution CODE may be written in parallel with the
+  phase 2 soak (DECISIONS §41-series) — that is deliberate, so the soak's
+  review isn't a standing start. It may not be ENABLED until the soak is
+  reviewed and the operator explicitly approves. Building and unlocking are
+  different things; this rule governs unlocking. Enforced structurally, not
+  just by convention: `LIVE_TRADING=true` in the environment AND an
+  interactive startup confirmation are BOTH required, mode defaults to
+  paper, and no code path may reach a real swap submission without both
+  gates satisfied — this is not weaker than the old "do not build one"
+  rule, it is the same rule aimed at the actual risk (money moving before
+  validation) rather than at the code's existence.
 - **Never present the strategy as profitable.** Report numbers and their
   limitations; let the operator conclude. If out-of-sample results are poor, say
   so plainly. A clear negative answer is a successful outcome for this project.
