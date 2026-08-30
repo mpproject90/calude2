@@ -150,6 +150,31 @@ describe('live trading gate', () => {
   });
 });
 
+describe('execution policy (DECISIONS §42) — config alone never enables anything, see gate.ts', () => {
+  it('applies sane defaults when omitted', () => {
+    const cfg = parseConfig({ global: {}, tokens: [token()] });
+    expect(cfg.global.execution).toEqual({
+      maxSlippageCapPct: 2, maxPriorityFeeLamports: 100_000,
+      killSwitchPath: 'data/LIVE_KILL_SWITCH', balanceReconcileIntervalMinutes: 15,
+      balanceReconcileToleranceSol: '0.001',
+    });
+  });
+
+  it('accepts an explicit override', () => {
+    const cfg = parseConfig({
+      global: { execution: { maxSlippageCapPct: 0.5, maxPriorityFeeLamports: 50_000 } },
+      tokens: [token()],
+    });
+    expect(cfg.global.execution.maxSlippageCapPct).toBe(0.5);
+    expect(cfg.global.execution.maxPriorityFeeLamports).toBe(50_000);
+  });
+
+  it('rejects a non-positive slippage cap', () => {
+    expect(() => parseConfig({ global: { execution: { maxSlippageCapPct: 0 } }, tokens: [token()] }))
+      .toThrow(ConfigError);
+  });
+});
+
 describe('manual positions — price-triggered entry/exit (DECISIONS §39)', () => {
   const position = (over: Record<string, unknown> = {}) => ({
     address: JUP, symbol: 'JUP', decimals: 6, buyAmountSol: '0.5', limitPrice: 0.8,

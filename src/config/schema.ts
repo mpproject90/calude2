@@ -249,6 +249,28 @@ export const regimeFilterSchema = z.object({
   solMaTimeframe: interval.default('4h'),
 });
 
+/**
+ * Phase 3 execution policy (DECISIONS §42). Purely configuration — none of
+ * this ENABLES live execution by itself; that still requires
+ * `LIVE_TRADING=true` plus an interactive startup confirmation
+ * (`src/execution/gate.ts`), checked in code the config layer cannot
+ * bypass. RPC URL and the wallet key are NOT here — they're secrets/
+ * deployment-specific, kept in `.env` only per CLAUDE.md, never in a
+ * config file that might get committed or shared.
+ */
+export const executionSchema = z.object({
+  /** ABORT (not accept) a swap whose fresh quote's real measured price impact exceeds this, in percent. */
+  maxSlippageCapPct: z.number().positive().max(50).default(2),
+  /** Hard ceiling passed to Jupiter's own dynamic priority-fee estimator — congestion can raise the fee up to this, never past it. */
+  maxPriorityFeeLamports: z.number().int().positive().default(100_000),
+  /** File whose mere presence halts every future swap attempt (src/execution/killSwitch.ts). */
+  killSwitchPath: z.string().min(1).default('data/LIVE_KILL_SWITCH'),
+  /** How often (minutes) to reconcile on-chain balances against the internal ledger, in addition to always doing it once at startup. */
+  balanceReconcileIntervalMinutes: z.number().int().positive().default(15),
+  /** Absolute tolerance (SOL) before a balance mismatch is reported — real fee/rent dust, not an error. */
+  balanceReconcileToleranceSol: decimalString.default('0.001'),
+});
+
 export const globalSchema = z.object({
   mode: z.enum(['backtest', 'paper', 'live']).default('backtest'),
   /**
@@ -288,6 +310,7 @@ export const globalSchema = z.object({
   stopPollSeconds: z.number().int().positive().max(3600).default(30),
   /** Modelled adverse slippage on a stop fill, in percent. */
   exitSlippagePct: z.number().min(0).default(0.5),
+  execution: executionSchema.default({}),
 });
 
 export const configSchema = z
@@ -365,6 +388,7 @@ export type TokenConfig = z.infer<typeof tokenSchema>;
 export type GlobalConfig = z.infer<typeof globalSchema>;
 export type ManualPositionConfig = z.infer<typeof manualPositionSchema>;
 export type LadderExitConfig = z.infer<typeof ladderExitSchema>;
+export type ExecutionConfig = z.infer<typeof executionSchema>;
 export type TpTranche = z.infer<typeof tpTrancheSchema>;
 export type TierAGates = z.infer<typeof tierAGatesSchema>;
 export type TierBGates = z.infer<typeof tierBGatesSchema>;
