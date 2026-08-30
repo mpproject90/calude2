@@ -6,10 +6,12 @@ next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
 **Last updated:** Phase 1 is CONCLUDED — see the prominent section
-immediately below. The project is now pivoting to phase 2 with a new
-design (manual entry, automated exit); the detailed scope is reported in
-"PHASE 2 PIVOT" further down, pending operator confirmation before any of
-it is built.
+immediately below. Phase 2's pivot (manual entry, automated exit) is
+built and confirmed (§39/§40). **Paper trading (spec step 8, DECISIONS
+§41) is now built too** — schema v3, price feed, fill simulator,
+persistence, the `tick()` runner, and the `npm run paper` CLI. 352 tests
+passing, typecheck clean. **Not yet run for real — see "Paper trading
+built, not yet run" further down for what's next.**
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -114,13 +116,60 @@ operator, then built:
 **322 tests passing, typecheck clean.** Verified against `main` by clean
 clone and tree-versus-index diff.
 
-**Not built, per operator direction — stop here and report**: paper
-trading (spec step 8, same code path with execution swapped for a
-simulator; validates the EXECUTION layer, not a strategy — does the stop
-fire at the right price, does position state stay consistent across a
-restart, does the price feed hold up over weeks, does a simulated failure
-get handled) and the live execution layer (spec step 10, gated on
-explicit operator approval after paper trading runs and is reviewed).
+**Not built, per operator direction — stop here and report** (superseded,
+see "Paper trading built, not yet run" below): paper trading (spec step
+8) and the live execution layer (spec step 10, gated on explicit operator
+approval after paper trading runs and is reviewed).
+
+## Paper trading built, not yet run (spec step 8, DECISIONS §41)
+
+Same code path as any future live path with execution swapped for a
+simulator (`paper/simulator.ts`) — `evaluateLimitEntry`,
+`evaluateLadderExit`, `evaluatePositionSize`, `evaluateCostFloor` all run
+unchanged; only the fill and its cost are simulated, nothing is sent to a
+DEX. Validates the EXECUTION layer, not a strategy: does the stop fire at
+the right price, does position state stay consistent across a restart,
+does the price feed hold up over weeks, does a simulated failure get
+handled.
+
+- **Schema v3** — `paper_positions` (mutable, resumable), `paper_fills` /
+  `paper_events` (append-only audit log). SOL amounts as `(raw bigint,
+  decimals)`, never floats.
+- **Price feed** (`paper/priceFeed.ts`) — latest 1-minute bar's close via
+  the existing `getPoolOhlcv`. Fails closed on a stale (>5 minutes old,
+  CLI default) or failed observation — no action that tick, for either
+  entry or exit.
+- **Runner** (`paper/runner.ts`, `tick()`) — one poll, one position:
+  observe price → enter or manage the exit, all through the real rule
+  functions. A real bug was found and fixed here: `evaluateLadderExit`'s
+  stop-loss/trailing/time branches sold the entire remaining position but
+  never zeroed `nextState.remainingSizeSol`, so the position never
+  actually closed in the store even though the correct fill was recorded
+  — caught by two runner integration tests asserting the position closes,
+  not by the pre-existing ladder-exit unit tests (they never asserted on
+  `nextState` for those three branches). Fixed in `src/rules/ladderExit.ts`.
+- **CLI** (`npm run paper -- --config config/default.yaml --db
+  data/paper.db`) — polls every `global.stopPollSeconds` (default 30s),
+  requires every `positions[]` entry to have `pinnedPoolAddress` set (no
+  dynamic pool discovery in this delivery), one position's tick failing
+  doesn't take the others down, SIGINT/SIGTERM stop cleanly after the
+  in-flight poll (nothing to flush — every tick's outcome is already
+  durable before the loop continues).
+- **`poolLiquiditySol` is `null`** — no live liquidity feed is built;
+  every entry hits position-size/cost-floor's existing fail-closed/
+  fallback path for this, printed explicitly, never silent.
+
+**Smoke-tested against the real GeckoTerminal API** (not mocked): the CLI
+reached a real pinned JUP pool, got zero trades in the lookback window,
+logged a `FEED ERROR` event through the fail-closed path, kept polling
+without crashing. This is one short run, not the weeks of soak time step
+9 needs.
+
+**Awaiting operator direction on**: which real position(s) to configure
+(mint address, limit price, ladder) and for how long to let this run
+before step 9's review. Nothing here places a real trade — CLAUDE.md's
+hard rule, still true, still enforced by there being no execution layer
+at all.
 
 ### Commands the operator runs (locally)
 
@@ -210,9 +259,9 @@ under `strict`, `noImplicitAny`, `noUncheckedIndexedAccess`,
      next open, MFE distribution, exit trigger breakdown, in/out-of-sample
      split, rejection counts per filter. Run once against real JUP data:
      0 trades, for a documented reason (DECISIONS §27) — see below.
-■ 7. STOP — report results, await operator review           ← HERE NOW
-□ 8. Paper trading mode
-□ 9. STOP — run for weeks, await operator review
+✓ 7. STOP — report results, operator confirmed the phase 2 pivot
+✓ 8. Paper trading mode — built (DECISIONS §41), not yet run for real
+■ 9. STOP — run for weeks, await operator review             ← HERE NOW
 □ 10. Live execution layer, on explicit approval only
 ```
 
@@ -234,8 +283,9 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Indicators | `src/indicators/` | RSI, MFI, ATR; warm-up gating; `{value, reliable, reason}` |
 | Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates, ladder cost preview (§40) |
 | Rules | `src/rules/` | phase 1 (preserved, not live): entry conditions, intrabar exits, portfolio limits. Phase 2 (live path, §39): limit entry, ladder exit |
+| Paper | `src/paper/` | price feed (§41), fill simulator, SQLite-backed persistence, `tick()` runner — spec step 8 |
 | Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
-| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study + declustering — §33–§35), `data:cex-backtest` (baseline backtest on the CEX-pooled series — §36), `backtest` |
+| CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study + declustering — §33–§35), `data:cex-backtest` (baseline backtest on the CEX-pooled series — §36), `backtest`, `paper` (§41 — polls `positions[]`, simulates fills, persists state) |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
 
 **Nothing here can place a trade.** There is no execution layer and no code path
@@ -802,10 +852,11 @@ zero (see above):
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 322
-cases across 10 files: `data` 91, `rules` 58, `backtest` 57, `filters` 38,
-`config` 25, `indicators` 23, `repo-hygiene` 10, `amount` 8, `logger` 8, `db`
-4. Phase 2's pivot (§39/§40) grew `rules` (limit entry + ladder exit),
-`filters` (ladder cost preview), and `config` (tranche/ladder/manual-position
-schema) the most recently; `backtest` grew earlier with the CEX study's
-decluster/exit-replay diagnostics (§35, §38).
+Counts are **test cases**, as reported by vitest — never assertions. 352
+cases across 11 files: `data` 91, `rules` 58, `backtest` 57, `paper` 30,
+`filters` 38, `config` 25, `indicators` 23, `repo-hygiene` 10, `amount` 8,
+`logger` 8, `db` 4. Paper trading (§41) added the new `paper` file (price
+feed, simulator, store, runner integration); phase 2's pivot (§39/§40) grew
+`rules` (limit entry + ladder exit), `filters` (ladder cost preview), and
+`config` (tranche/ladder/manual-position schema); `backtest` grew earlier
+with the CEX study's decluster/exit-replay diagnostics (§35, §38).

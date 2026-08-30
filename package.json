@@ -17,7 +17,8 @@
     "data:screen": "tsx src/cli/screen.ts",
     "data:cex-study": "tsx src/cli/cex-study.ts",
     "data:cex-backtest": "tsx src/cli/cex-backtest.ts",
-    "backtest": "tsx src/cli/backtest.ts"
+    "backtest": "tsx src/cli/backtest.ts",
+    "paper": "tsx src/cli/paper.ts"
   },
   "dependencies": {
     "better-sqlite3": "^11.7.0",

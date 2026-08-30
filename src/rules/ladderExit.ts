@@ -107,7 +107,7 @@ export function evaluateLadderExit(input: {
         reason: 'stop_loss', sizeSol: state.remainingSizeSol,
         fillPrice: fillAfterSlippage(state.stopLossPrice, exitSlippagePct), trancheIndex: null,
       },
-      nextState,
+      nextState: { ...nextState, remainingSizeSol: state.remainingSizeSol.sub(state.remainingSizeSol) },
     };
   }
 
@@ -120,7 +120,7 @@ export function evaluateLadderExit(input: {
           reason: 'trailing', sizeSol: state.remainingSizeSol,
           fillPrice: fillAfterSlippage(trailStop, exitSlippagePct), trancheIndex: null,
         },
-        nextState,
+        nextState: { ...nextState, remainingSizeSol: state.remainingSizeSol.sub(state.remainingSizeSol) },
       };
     }
   }
@@ -156,7 +156,7 @@ export function evaluateLadderExit(input: {
   if (elapsedMinutes >= config.timeExitMinutes) {
     return {
       trigger: { reason: 'time', sizeSol: state.remainingSizeSol, fillPrice: window.close, trancheIndex: null },
-      nextState,
+      nextState: { ...nextState, remainingSizeSol: state.remainingSizeSol.sub(state.remainingSizeSol) },
     };
   }
 

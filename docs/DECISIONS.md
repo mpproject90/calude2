@@ -1827,3 +1827,116 @@ Manually verified against two real example configs (a failing ladder and a
 passing one) before committing, in addition to the 12 hand-computed unit
 tests — this is what caught the sold-amount bug above; the unit tests
 alone had not exercised a partial-sellPct case yet.
+
+## 41. Paper trading (spec step 8): schema, price feed, simulator, store, runner, CLI
+
+**Same rule-evaluation code as any future live path** — `paper/runner.ts`'s
+`tick()` calls `evaluateLimitEntry`, `evaluateLadderExit`,
+`evaluatePositionSize`, `evaluateCostFloor` unchanged; nothing here
+re-implements a decision, only simulates the fill and persists the result.
+Per CLAUDE.md's "one strategy implementation" rule: if paper and a future
+live path ever disagreed, it could only be because the EXECUTION layer
+they call into differs, never the position logic. **Nothing here places a
+real trade** — the fill is simulated (`paper/simulator.ts`), never sent to
+a DEX.
+
+**Schema v3** (`src/db/index.ts`) adds three tables: `paper_positions`
+(mutable, resumable state — the one row per open/closed position a
+restart reads back), `paper_fills` (append-only audit log, one row per
+entry/tranche/stop/trailing/time fill), `paper_events` (append-only,
+stale-feed/feed-error/entry-skipped occurrences — the record of every
+decision NOT to act, as important as the record of every fill). Every SOL
+amount is `(raw bigint TEXT, decimals INTEGER)`, never `REAL`, per spec
+§2.5 and CLAUDE.md's no-floats rule; one shared `size_decimals` column per
+row covers every `TokenAmount` field in that row since everything here is
+SOL-denominated.
+
+**Price feed** (`paper/priceFeed.ts`, `GeckoTerminalPriceFeed`) — AMM
+pools have no order book, so "current price" is the latest 1-minute bar's
+close from the same `getPoolOhlcv` method `data:fetch`/`data:screen`
+already use (no new endpoint). **Staleness is fail-closed**: `isStale`
+compares the observation's age against `staleAfterMs`; the runner refuses
+to act on a stale or failed observation for BOTH entry and exit that
+tick, the same treatment the indicator-reliability mask gives a gap. The
+CLI (`src/cli/paper.ts`) sets `staleAfterMs` to 5 minutes — five polls at
+the default 30s `stopPollSeconds` before the guard trips, wide enough
+that one slow request doesn't itself trip it, tight enough that a
+genuinely stuck feed does.
+
+**Fill simulator** (`paper/simulator.ts`) — two cost treatments kept
+deliberately separate so nothing double-counts: PRICE-LEVEL slippage is
+baked into the fill price itself (entry fills at the ask —
+`mid * (1 + slippagePct/100)`, sized off `poolLiquiditySol` the same way
+`costFloor.ts` does for one leg, falling back to a flat estimate when
+liquidity is unknown; exits already do this via `evaluateLadderExit`'s
+`fillAfterSlippage`, reused as-is). TRANSACTION-LEVEL cost (DEX fee % +
+flat priority-fee/Jito-tip SOL) is a separate deduction from the recorded
+SOL amounts, never folded into the fill price — mirrors §40's per-tranche
+treatment, not a new invented model.
+
+**Store** (`paper/store.ts`, `PaperStore`) — `openPosition`/
+`updatePosition`/`closePosition` mutate the resumable row;
+`recordFill`/`recordEvent` are append-only. `getOpenPosition(symbol)` is
+the ONLY read path the runner uses, which is what makes crash-recovery
+free: a fresh `PaperStore` wrapping the same db file after a restart just
+sees whatever was last durably written — verified with a test that opens
+a SECOND `PaperStore` on the SAME underlying db mid-ladder and confirms
+trading resumes correctly, including a still-pending tranche firing
+afterward.
+
+**Runner** (`paper/runner.ts`, `tick()`) — one poll for one configured
+position: observe price (fail closed on stale/error) → if no open
+position, try the limit entry (position-size filter, then cost-floor,
+called UNCONDITIONALLY unlike the backtest CLI's bypass when
+`poolLiquiditySol` is null — paper trading validates the live-code path,
+so it gets the real fail-closed behavior, not backtest's data-availability
+accommodation) → if a position is open, try the ladder exit. Cost-floor's
+"expected move" input, which normally comes from an indicator, has no
+indicator to read here — the ladder's own first-tranche target percent
+(the operator's own stated expected move) stands in for it, so the gate
+still means something instead of being silently skipped.
+
+**A real bug found by the runner's own integration tests, not by the
+ladder-exit unit tests that existed before this delivery**:
+`evaluateLadderExit`'s stop-loss, trailing, and time-exit branches each
+return a trigger that sells the ENTIRE remaining position, but the
+function's `nextState` only zeroed `remainingSizeSol` in the take-profit
+branch — the other three left it unchanged. Nothing caught this in
+`rules.test.ts` because those tests only asserted on `trigger`, never on
+`nextState.remainingSizeSol` for those three branches. Two runner
+integration tests wired the real `PaperStore` through a full stop-loss and
+a full tranche-then-trailing sequence and asserted the position actually
+CLOSES (`getOpenPosition` returns `null`) — both failed against the
+pre-fix code with the position still open and its size untouched, proving
+the exit was never durably recorded as closed. Fixed by setting
+`nextState.remainingSizeSol` to zero (`state.remainingSizeSol.sub(state.
+remainingSizeSol)`, preserving `TokenAmount`'s decimals) in all three
+branches; no assertion in the pre-existing unit tests depended on the old
+(buggy) value, so nothing needed updating there. This is exactly the kind
+of execution-layer bug paper trading exists to surface (STATUS.md: "does
+the stop fire at the right price" — it fired, but the position never
+actually closed).
+
+**CLI** (`src/cli/paper.ts`, `npm run paper`) — loads `positions[]`
+(refuses to start if empty, or if any position lacks
+`pinnedPoolAddress` — dynamic pool discovery is not part of this delivery,
+re-discovering on every poll would reintroduce the exact pool-selection
+instability §29 fixed by pinning), opens the schema-v3 db, wires the real
+`GeckoTerminalCandleProvider`/`GeckoTerminalPriceFeed`, and polls every
+configured position once per `global.stopPollSeconds`. One position's tick
+throwing is caught and logged as a `feed_error` event rather than crashing
+the poller — fail-closed means "don't act on this position this tick," not
+"take every other position down too." SIGINT/SIGTERM stop the loop after
+the in-flight poll; nothing needs flushing on exit since every tick's
+outcome is already durably written before the loop moves on.
+`poolLiquiditySol` is `null` in this delivery (no live liquidity feed
+built) — printed explicitly at startup and on every entry evaluation
+that hits it, never a silent gap.
+
+Smoke-tested against the real GeckoTerminal API end to end (not mocked):
+`npm run paper` against a real pinned JUP pool reached the live endpoint,
+got zero trades in the lookback window, logged a `FEED ERROR` event
+through the fail-closed path, and kept polling without crashing — the
+loop, the real network wiring, and the fail-closed handling all verified
+working together, though this was a single short run, not the "weeks" of
+soak time step 9 calls for.

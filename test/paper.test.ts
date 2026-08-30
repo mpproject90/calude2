@@ -8,12 +8,15 @@ import {
 } from '../src/paper/priceFeed.js';
 import { simulateEntryFill, tranchePnl } from '../src/paper/simulator.js';
 import { PaperStore } from '../src/paper/store.js';
+import { tick, type TickDeps } from '../src/paper/runner.js';
 import { openDb } from '../src/db/index.js';
 import { sol } from '../src/util/amount.js';
 import { parseConfig } from '../src/config/load.js';
-import type { LadderExitConfig } from '../src/config/schema.js';
+import { globalSchema } from '../src/config/schema.js';
+import type { LadderExitConfig, ManualPositionConfig } from '../src/config/schema.js';
 
 const JUP = 'JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN';
+const POOL = 'C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg';
 
 function testLadderConfig(): LadderExitConfig {
   return parseConfig({
@@ -311,5 +314,181 @@ describe('PaperStore (DECISIONS §41) — mutable position state + immutable fil
       expect(fills[0]!.kind).toBe('take_profit');
       db2.close();
     });
+  });
+});
+
+function testPosition(over: Record<string, unknown> = {}): ManualPositionConfig {
+  return parseConfig({
+    global: {}, tokens: [],
+    positions: [{
+      address: JUP, symbol: 'JUP', buyAmountSol: '1', limitPrice: 100, pinnedPoolAddress: POOL,
+      ladder: {
+        tranches: [{ targetGainPct: 15, sellPct: 50 }, { targetGainPct: 30, sellPct: 50 }],
+        stopLossPct: 15, timeExitMinutes: 2880,
+      },
+      ...over,
+    }],
+  }).positions[0]!;
+}
+
+function fixedFeed(price: number, timestamp: number) {
+  return { getPrice: async () => ({ price, timestamp }) };
+}
+
+function throwingFeed(message: string) {
+  return { getPrice: async (): Promise<never> => { throw new Error(message); } };
+}
+
+describe('tick (DECISIONS §41) — runner integration, same rule-evaluation code throughout', () => {
+  function harness() {
+    const db = openDb(':memory:');
+    const store = new PaperStore(db);
+    const logs: string[] = [];
+    const baseDeps = {
+      store, global: globalSchema.parse({}), log: (m: string) => logs.push(m),
+      staleAfterMs: 5 * MIN, poolLiquiditySol: 100_000,
+    };
+    return { db, store, logs, baseDeps };
+  }
+
+  it('does nothing while price is above the limit — no position, no log', async () => {
+    const { store, logs, baseDeps } = harness();
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(101, T0), now: () => T0 };
+    await tick(testPosition(), deps);
+    expect(store.getOpenPosition('JUP')).toBeNull();
+    expect(logs).toHaveLength(0);
+  });
+
+  it('fills the entry at the ask (worse than mid), opens the position, records the fill', async () => {
+    const { store, logs, baseDeps } = harness();
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0), now: () => T0 };
+    await tick(testPosition(), deps);
+    const open = store.getOpenPosition('JUP');
+    expect(open).not.toBeNull();
+    expect(open!.entryPrice).toBeGreaterThan(99);   // ask, not the observed mid
+    expect(open!.remainingSizeSol.toNumberUnsafe()).toBeGreaterThan(0);
+    expect(logs.some((l) => l.includes('ENTRY FILLED'))).toBe(true);
+  });
+
+  it('fails closed and skips the entry when pool liquidity is unknown', async () => {
+    const { db, store, logs, baseDeps } = harness();
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0), now: () => T0, poolLiquiditySol: null };
+    await tick(testPosition(), deps);
+    expect(store.getOpenPosition('JUP')).toBeNull();
+    expect(logs.some((l) => l.includes('ENTRY SKIPPED'))).toBe(true);
+    const events = db.prepare("SELECT kind FROM paper_events WHERE kind = 'entry_skipped'").all() as { kind: string }[];
+    expect(events).toHaveLength(1);
+  });
+
+  it('skips the entry when cost-floor rejects it (target too small to clear round-trip cost)', async () => {
+    const { store, logs, baseDeps } = harness();
+    const position = testPosition({
+      ladder: {
+        tranches: [{ targetGainPct: 0.01, sellPct: 100 }],   // far too small to clear 3x round-trip cost
+        stopLossPct: 15, timeExitMinutes: 2880,
+      },
+    });
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0), now: () => T0 };
+    await tick(position, deps);
+    expect(store.getOpenPosition('JUP')).toBeNull();
+    expect(logs.some((l) => l.includes('ENTRY SKIPPED') && l.includes('cost-floor'))).toBe(true);
+  });
+
+  it('refuses to act on a stale price observation — no entry, event logged', async () => {
+    const { store, logs, baseDeps } = harness();
+    // observation is 10 minutes old, threshold is 5
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0 - 10 * MIN), now: () => T0 };
+    await tick(testPosition(), deps);
+    expect(store.getOpenPosition('JUP')).toBeNull();
+    expect(logs.some((l) => l.includes('STALE FEED'))).toBe(true);
+  });
+
+  it('handles a feed error without crashing and without acting', async () => {
+    const { store, logs, baseDeps } = harness();
+    const deps: TickDeps = { ...baseDeps, feed: throwingFeed('connection reset'), now: () => T0 };
+    await expect(tick(testPosition(), deps)).resolves.toBeUndefined();
+    expect(store.getOpenPosition('JUP')).toBeNull();
+    expect(logs.some((l) => l.includes('FEED ERROR'))).toBe(true);
+  });
+
+  it('throws a clear error when a position has no pinned pool address', async () => {
+    const { baseDeps } = harness();
+    const position = testPosition({ pinnedPoolAddress: undefined });
+    const deps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0), now: () => T0 };
+    await expect(tick(position, deps)).rejects.toThrow(/pinnedPoolAddress/);
+  });
+
+  it('fires the hard stop-loss intrabar-equivalent (the single observed tick), closes the position', async () => {
+    const { store, logs, baseDeps } = harness();
+    const position = testPosition();
+    const entryDeps: TickDeps = { ...baseDeps, feed: fixedFeed(99, T0), now: () => T0 };
+    await tick(position, entryDeps);
+    const entryPrice = store.getOpenPosition('JUP')!.entryPrice;
+
+    const stopPrice = entryPrice * 0.8;   // well past the 15% stop
+    const exitDeps: TickDeps = { ...baseDeps, feed: fixedFeed(stopPrice, T0 + MIN), now: () => T0 + MIN };
+    await tick(position, exitDeps);
+
+    expect(store.getOpenPosition('JUP')).toBeNull();   // closed
+    expect(logs.some((l) => l.includes('STOP_LOSS FILLED') && l.includes('CLOSED'))).toBe(true);
+  });
+
+  it('arms trailing exactly on the tranche-1 fill, and partial-fill accounting stays consistent', async () => {
+    const { store, logs, baseDeps } = harness();
+    const position = testPosition({
+      ladder: {
+        tranches: [{ targetGainPct: 15, sellPct: 40 }, { targetGainPct: 30, sellPct: 40 }],
+        trailing: { enabled: true, trailPct: 5 }, stopLossPct: 15, timeExitMinutes: 2880,
+      },
+    });
+    await tick(position, { ...baseDeps, feed: fixedFeed(99, T0), now: () => T0 });
+    const afterEntry = store.getOpenPosition('JUP')!;
+    expect(afterEntry.trailingArmed).toBe(false);   // not armed before any tranche fills
+    const entryPrice = afterEntry.entryPrice;
+    const originalSize = afterEntry.originalSizeSol;
+
+    const tranche1Price = entryPrice * 1.16;   // clears the +15% target
+    await tick(position, { ...baseDeps, feed: fixedFeed(tranche1Price, T0 + MIN), now: () => T0 + MIN });
+    const afterTranche1 = store.getOpenPosition('JUP')!;
+    expect(afterTranche1.trailingArmed).toBe(true);   // armed on the SAME tick tranche 1 filled
+    expect(afterTranche1.filledTrancheCount).toBe(1);
+    // 40% sold, 60% remains — checked against the ORIGINAL size, not re-derived
+    const expectedRemaining = originalSize.toNumberUnsafe() * 0.6;
+    expect(afterTranche1.remainingSizeSol.toNumberUnsafe()).toBeCloseTo(expectedRemaining, 6);
+    expect(afterTranche1.stopLossPrice).toBeCloseTo(afterEntry.stopLossPrice, 10);   // stop level unchanged by a TP fill
+    expect(logs.some((l) => l.includes('TAKE_PROFIT FILLED'))).toBe(true);
+
+    // now trail: price retreats 5% from its peak — should fire the trailing stop for the REMAINDER
+    const peak = afterTranche1.peakPrice;
+    const trailPrice = peak * 0.94;
+    await tick(position, { ...baseDeps, feed: fixedFeed(trailPrice, T0 + 2 * MIN), now: () => T0 + 2 * MIN });
+    expect(store.getOpenPosition('JUP')).toBeNull();   // fully closed — the trail took the rest
+    expect(logs.some((l) => l.includes('TRAILING FILLED') && l.includes('CLOSED'))).toBe(true);
+  });
+
+  it('resumes correctly across a simulated restart — a fresh PaperStore on the SAME db mid-ladder', async () => {
+    const { db, store, baseDeps } = harness();
+    const position = testPosition();
+    await tick(position, { ...baseDeps, feed: fixedFeed(99, T0), now: () => T0 });
+    const entryPrice = store.getOpenPosition('JUP')!.entryPrice;
+    const tranche1Price = entryPrice * 1.16;
+    await tick(position, { ...baseDeps, feed: fixedFeed(tranche1Price, T0 + MIN), now: () => T0 + MIN });
+    const beforeRestart = store.getOpenPosition('JUP')!;
+
+    // "restart" — a brand new PaperStore wrapping the SAME underlying db, as
+    // a fresh process would after re-running `openDb` against the same file
+    const freshStore = new PaperStore(db);
+    const resumed = freshStore.getOpenPosition('JUP')!;
+    expect(resumed.remainingSizeSol.eq(beforeRestart.remainingSizeSol)).toBe(true);
+    expect(resumed.filledTrancheCount).toBe(beforeRestart.filledTrancheCount);
+    expect(resumed.peakPrice).toBe(beforeRestart.peakPrice);
+
+    // continue trading against the RESUMED store — the second tranche should
+    // still fire correctly, proving the resumed state is fully usable, not just readable
+    const freshLogs: string[] = [];
+    const resumedDeps: TickDeps = { ...baseDeps, store: freshStore, log: (m) => freshLogs.push(m), feed: fixedFeed(entryPrice * 1.31, T0 + 2 * MIN), now: () => T0 + 2 * MIN };
+    await tick(position, resumedDeps);
+    expect(freshStore.getOpenPosition('JUP')).toBeNull();   // both tranches filled -> closed
+    expect(freshLogs.some((l) => l.includes('TAKE_PROFIT FILLED') && l.includes('CLOSED'))).toBe(true);
   });
 });
