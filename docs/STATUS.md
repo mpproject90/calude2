@@ -5,27 +5,77 @@ conversation history, this tells you where the project stands and what happens
 next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
-**Last updated:** Phase 1 is CONCLUDED — see the prominent section
-immediately below. Phase 2's pivot (manual entry, automated exit) is
-built and confirmed (§39/§40). **Paper trading (spec step 8, DECISIONS
-§41) is built and RESTARTING clean.** Two real blockers were found and
-fixed the same day the first soak hour ran, both documented in DECISIONS
-§41's follow-ups: the price feed was switched from pool candles to
-Jupiter's quote API (13/13 ticks had been feed errors under the old
-one), and `evaluatePositionSize`'s unconditional fail-closed on
-`poolLiquiditySol: null` — which meant NO entry could ever fill, at any
-price — is resolved by deriving an implied liquidity bound from Jupiter's
-own measured `priceImpactPct` (operator's chosen fix, of three options
-put to them). **Verified end-to-end against the live endpoint: a real
-entry filled** — the first one this delivery has ever produced against a
-live feed. **Phase 3's execution layer (spec step 10, DECISIONS §42) is
-now built too — WRITTEN, NOT ENABLED**, per an updated CLAUDE.md hard
-rule: building may happen in parallel with the phase 2 soak, unlocking
-requires the soak's review and explicit operator approval, enforced
-structurally (`LIVE_TRADING=true` + a typed confirmation phrase + config
-`mode: live`, all three, checked in the code, not by convention). See
-"Phase 3 execution layer — built, not unlocked" below. 420 tests passing,
-typecheck clean.
+## RESUME FROM HERE — end-of-session handoff, 2026-08-30
+
+**The soak is running RIGHT NOW, unattended, overnight, on the operator's
+own machine.** Last checked 2026-08-30T14:05 UTC: a JUP position is open
+(entry 0.002034025462703672, stop-loss 0.001728921643298121, no tranche
+filled yet — still the full original size), feed stats 185 usable / 5
+blind ticks, longest blind streak 33.1 minutes. Commit at handoff:
+**`2a1048a`**, working tree clean, clean-clone verified (420/420 tests,
+typecheck clean, tree-vs-index diff empty) immediately before this note
+was written.
+
+### Do NOT touch — this session or the next one
+
+- **The Windows Scheduled Task `SolBotPaperTrading`.** Leave it running.
+  Do not `Stop-ScheduledTask`, `Disable-ScheduledTask`, or
+  `Unregister-ScheduledTask`. Checking its status (`Get-ScheduledTask`)
+  and tailing the log are fine; stopping or restarting it is not, unless
+  the operator explicitly asks for the deliberate restart test (still
+  outstanding, see below) or the position has closed and a fresh soak is
+  being deliberately started.
+- **`data/paper.db`, `data/paper-run.log`.** The running soak owns these.
+  Reading them (a fresh script, a `SELECT`) is fine; writing, deleting, or
+  wiping them is not.
+- **`config/default.yaml`.** This is the soak's active config — the open
+  position was entered against it. Do not edit it while a position is
+  open against it.
+- **Phase 3 — anything that unlocks it.** `src/execution/` and
+  `src/cli/live.ts` are built and tested but must stay OFF: do not set
+  `LIVE_TRADING=true`, do not type the confirmation phrase, do not run
+  `npm run live` against a funded wallet or `mode: live`. Stays disabled
+  until the phase 2 soak is reviewed and the operator explicitly
+  approves — CLAUDE.md's hard rule, unchanged by anything built this
+  session.
+
+### Next actions, in order
+
+1. **Investigate the 33-minute blind streak's cause — not yet done.**
+   Evidence gathered but not chased down: the log shows a normal tick at
+   `12:12:26.672Z` (feed: 25 ok / 0 blind), then a single `FEED ERROR`
+   at `12:17:55.060Z` ("quote request failed", no further detail — the
+   log only prints the wrapper message, not the underlying cause chain),
+   then **nothing at all for 25.5 minutes** until `12:43:29.228Z`, then
+   three more `FEED ERROR`s about 30s apart, then clean recovery from
+   `12:45:29.782Z` onward (stable ever since, 140+ ticks). The
+   `usable_count`/`error_count` counters climbed continuously through
+   this window rather than resetting — this was the SAME long-lived
+   process throughout, not a restart. **Leading hypothesis, unconfirmed:
+   the machine went to sleep or was otherwise network-unreachable for
+   ~25 minutes**, then took ~90 seconds of failed attempts to reconnect
+   before requests started succeeding again. Worth checking: Windows
+   Event Viewer's power/sleep events around 12:12–12:43 UTC (local time
+   is UTC+7, so ~19:12–19:43 local) to confirm or rule this out. If
+   confirmed, this is a genuine, expected soak finding (a laptop's real
+   sleep behavior interacting with the feed), not a code defect — but it
+   has not been confirmed yet, only hypothesized from the log's shape.
+2. **Report when the soak's open position hits an exit.** This is the
+   "first full cycle" the operator wants to see reviewed. A persistent
+   log-tail watch for exit-trigger lines (`TAKE_PROFIT FILLED`,
+   `TRAILING FILLED`, `STOP_LOSS FILLED`, `TIME FILLED`) was armed during
+   the session that built the execution layer — if this is a genuinely
+   fresh session with no memory of that conversation, the watch does not
+   carry over automatically; re-arm one against `data/paper-run.log` if
+   the operator asks for it, or just check the log/db directly when
+   asked for a status update.
+3. **The deliberate mid-soak restart test is still outstanding** (from
+   the operator's original soak requirements) — kill the tracked process
+   fully (recursively — DECISIONS §41's "process-tree caveat" explains
+   why a partial kill looks like success but isn't) and confirm the
+   periodic self-heal trigger relaunches it with state intact. Not done
+   yet; do this only when explicitly asked, not proactively, since it
+   requires deliberately interrupting the running soak.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -135,7 +185,13 @@ see "Paper trading built, not yet run" below): paper trading (spec step
 8) and the live execution layer (spec step 10, gated on explicit operator
 approval after paper trading runs and is reviewed).
 
-## Paper trading soak test — restarting clean (spec step 8, DECISIONS §41)
+## Paper trading soak test — RUNNING (spec step 8, DECISIONS §41)
+
+**For the current live numbers (open position, feed stats, what's
+outstanding), see "RESUME FROM HERE" at the top of this file — that's
+the section kept up to date at the end of each session.** What follows
+here is the narrative of how the soak got to its current config and
+deployment, not a live status snapshot.
 
 **Config (unchanged in shape, price source changed underneath it)**: JUP,
 limit 0.00210245 (~3% above the 0.0020412 spot observed via a live
