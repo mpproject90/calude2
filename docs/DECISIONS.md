@@ -1940,3 +1940,85 @@ through the fail-closed path, and kept polling without crashing — the
 loop, the real network wiring, and the fail-closed handling all verified
 working together, though this was a single short run, not the "weeks" of
 soak time step 9 calls for.
+
+**Stale-feed guard confirmed to cover both entry and exit, not just
+exit**: `tick()` (`src/paper/runner.ts`) calls `observePrice` exactly
+once at its top and returns immediately if it is `null` — a stale or
+failed observation — before branching into `tryEnter` or `tryExit`.
+Neither can run without a fresh price. This was already true of the
+delivery above; re-verified explicitly per operator direction before
+starting the soak test, since "a stop evaluated against a 20-minute-old
+price is worse than no stop" made it worth confirming rather than
+assuming.
+
+## The one-week soak test — JUP, 0.1 SOL, +10%/+20% ladder (started 2026-08-30)
+
+Config: `config/default.yaml`'s `positions[]`, `global.mode: paper`.
+Operator-specified shape, not re-derived:
+
+- **JUP**, the same pinned meteora JUP/SOL pool
+  (`C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg`) `tokens[]` already uses
+  — most validated pool in this project (§24–§31), chosen specifically so
+  this soak test isn't also a pool-discovery test.
+- **Limit price 0.0021068** (SOL/JUP) — spot observed at 0.0020454 via a
+  1h candle read moments before starting (the pool's own 1-minute bars are
+  sparse, see below), ~3% above. Deliberately above spot per operator
+  direction: this soak tests EXECUTION machinery, not entry quality — a
+  limit that takes days to fill wastes soak time and answers nothing
+  CLAUDE.md's hard rule cares about.
+- **Ladder**: tranche 1 sells 40% at +10%, tranche 2 sells 30% at +20%,
+  remaining 30% held with trailing (trailPct 10%, the schema default —
+  not specified by the operator, flagged as a choice rather than picked
+  silently) armed once tranche 1 fills. Hard stop −15%. Time exit 4320
+  minutes (72h) — shorter than the 1-week soak minimum, so a position
+  reaching the time exit and the runner re-entering afterward (see below)
+  is expected, not a sign anything stopped early.
+- **0.1 SOL buy size** — chosen from a sweep of `computeLadderCostPreview`
+  across 0.05/0.08/0.1/0.15/0.2/0.3/0.5 SOL against this exact ladder; 0.05
+  already cleared both checks (5.63%/14.50% net gain vs the 5% floor,
+  2.73%/3.33% fixed-cost ratio vs the 20% ceiling) but with thin margin at
+  the smallest tranche, so 0.1 was picked for a comfortable buffer
+  (7.13%/16.50% net, 1.36%/1.67% fixed-cost) while staying small — this is
+  a mechanism test, not a capital allocation. `npm run config:check`
+  confirms the same numbers against the actual shipped config (recorded
+  below), not just the sweep script.
+
+```
+--- JUP (limit 0.0021068, 0.1 SOL) ---
+tranche  target%  sell%  costBasis  grossProceeds  dexFee    slippage       fixedFee   netGain%   fixedCost%   result
+  [0]     10.0   40.0     0.0400         0.0440  0.000110  0.000440(est)   0.000600      7.13%        1.36%   PASS
+  [1]     20.0   30.0     0.0300         0.0360  0.000090  0.000360(est)   0.000600     16.50%        1.67%   PASS
+  whole-ladder exit cost: 2.20% of position   single exit at blended avg (+14.3%): 1.60% of position   PREMIUM FOR LADDERING: 0.60%
+```
+
+**A real property of this pool found while picking the limit price, worth
+flagging before the soak starts**: 1-minute bars are sparse — a 3-hour
+sample found only 12 of 180 possible 1-minute bars had a trade, median gap
+9 minutes, max gap 55 minutes. `GeckoTerminalPriceFeed`'s own 5-minute
+OHLCV lookback (`priceFeed.ts`) will legitimately return "no trades in the
+last 5 minutes" (a `PriceFeedError`, logged as `feed_error`, not
+`stale_feed` — the two are handled the same way by `tick()`: no action)
+on a large fraction of the 30-second polls. This is the price feed's real
+behavior over this exact pool, not a bug — expected to show up
+prominently in what step 9's review looks at ("any gaps, any staleness").
+
+**No cooldown between a close and the next entry is wired into the paper
+path** — `evaluatePositionSize`/`evaluateCostFloor` run on every tick with
+no open position, but `portfolio.ts`'s `cooldownCandlesAfterLoss` check
+(phase-1, candle-indexed) is not called from `runner.ts` at all. Since the
+limit price sits above spot, a position that closes while price is still
+below the limit will likely re-enter on the very next successful price
+observation. Flagged, not treated as a bug to fix here: it was not part of
+what the operator asked built, and for THIS soak test it is a feature, not
+a problem — it is expected to produce the "more than one exit trigger
+type" the operator wants to see over the week, by giving multiple
+entry-to-exit cycles rather than one. If the paper CLI is left running
+unattended for longer than one week, this is worth revisiting.
+
+**Deliberate restart test**: per operator direction, a restart mid-position
+will be performed by hand partway through the week (kill the `npm run
+paper` process, start it again against the same `--db`), with the
+resumed position's state checked against what was open just before the
+kill — `paper/store.ts`'s `getOpenPosition` read path is what makes this
+free (§41), but this soak test is the first time it is exercised against
+a real, not synthetic, in-flight position.

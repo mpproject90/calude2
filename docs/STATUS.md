@@ -8,10 +8,9 @@ next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 **Last updated:** Phase 1 is CONCLUDED — see the prominent section
 immediately below. Phase 2's pivot (manual entry, automated exit) is
 built and confirmed (§39/§40). **Paper trading (spec step 8, DECISIONS
-§41) is now built too** — schema v3, price feed, fill simulator,
-persistence, the `tick()` runner, and the `npm run paper` CLI. 352 tests
-passing, typecheck clean. **Not yet run for real — see "Paper trading
-built, not yet run" further down for what's next.**
+§41) is built and now RUNNING** — a one-week soak test on JUP started
+2026-08-30, see "Paper trading soak test — in progress" further down.
+352 tests passing, typecheck clean.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -121,7 +120,38 @@ see "Paper trading built, not yet run" below): paper trading (spec step
 8) and the live execution layer (spec step 10, gated on explicit operator
 approval after paper trading runs and is reviewed).
 
-## Paper trading built, not yet run (spec step 8, DECISIONS §41)
+## Paper trading soak test — in progress (spec step 8, DECISIONS §41)
+
+**Started 2026-08-30.** JUP, pinned meteora JUP/SOL pool, limit
+0.0021068 (~3% above the 0.0020454 spot observed at start), 0.1 SOL,
+ladder 40%@+10% / 30%@+20% / 30% held with trailing (10%) armed after
+tranche 1, hard stop −15%, time exit 72h. Cost preview passed both
+checks on every tranche with comfortable margin — full numbers and the
+size sweep that picked 0.1 SOL are in DECISIONS §41. Config is the live
+`config/default.yaml` (`global.mode: paper`).
+
+**Known going in, not bugs**: this pool's 1-minute bars are sparse (12 of
+180 possible bars had a trade in a 3h sample, median gap 9 min, max 55
+min) — expect frequent `feed_error` events on individual polls, by
+design (fail-closed). No cooldown is wired into the paper path, so a
+closed position will likely re-enter immediately if price is still below
+the limit — expected to produce multiple entry-to-exit cycles over the
+week rather than one.
+
+**Soak minimum: one week.** What step 9's review needs, per operator
+direction:
+- At least one full entry-to-exit cycle, ideally more than one exit
+  trigger type.
+- A deliberate mid-soak restart (kill `npm run paper`, restart against
+  the same `--db`), with resumed state checked against what was open just
+  before the kill.
+- The price feed's real behavior over days — gaps, staleness,
+  rate-limiting.
+- Any transient disagreement between the store and expected state.
+
+Nothing here places a real trade — no execution layer exists.
+
+## Paper trading — what was built (spec step 8, DECISIONS §41)
 
 Same code path as any future live path with execution swapped for a
 simulator (`paper/simulator.ts`) — `evaluateLimitEntry`,
@@ -159,17 +189,10 @@ handled.
   every entry hits position-size/cost-floor's existing fail-closed/
   fallback path for this, printed explicitly, never silent.
 
-**Smoke-tested against the real GeckoTerminal API** (not mocked): the CLI
-reached a real pinned JUP pool, got zero trades in the lookback window,
-logged a `FEED ERROR` event through the fail-closed path, kept polling
-without crashing. This is one short run, not the weeks of soak time step
-9 needs.
-
-**Awaiting operator direction on**: which real position(s) to configure
-(mint address, limit price, ladder) and for how long to let this run
-before step 9's review. Nothing here places a real trade — CLAUDE.md's
-hard rule, still true, still enforced by there being no execution layer
-at all.
+**Smoke-tested against the real GeckoTerminal API** (not mocked) before
+the soak test above started: the CLI reached a real pinned JUP pool, got
+zero trades in the lookback window, logged a `FEED ERROR` event through
+the fail-closed path, kept polling without crashing.
 
 ### Commands the operator runs (locally)
 

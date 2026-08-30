@@ -96,8 +96,11 @@ describe('config validation', () => {
   });
 
   it('loads and validates the shipped default config', () => {
+    // mode is 'paper' during the DECISIONS §41 soak test — a non-trading
+    // mode, same category as 'backtest' per spec §2.3; update this
+    // assertion when the config's active mode changes again.
     const cfg = loadConfig('config/default.yaml');
-    expect(cfg.global.mode).toBe('backtest');
+    expect(cfg.global.mode).toBe('paper');
     expect(cfg.tokens.length).toBeGreaterThan(0);
   });
 });

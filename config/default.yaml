@@ -12,7 +12,7 @@
 # whose economics don't clear (DECISIONS §40).
 
 global:
-  mode: backtest
+  mode: paper
   # Pins the SOL/USD(C) reference pool data:fetch uses for the regime and
   # relative-strength filters (DECISIONS §20, §29/§30) — Orca's deep SOL/USDC
   # pool, ~$25M reserve at time of writing. Skips discovery/dominance
@@ -96,9 +96,8 @@ tokens:
       cooldownCandlesAfterLoss: 24
       minViableBuyAmountSol: "0.05"
 
-# The live entry path (DECISIONS §39/§40). Example shape, commented out —
-# uncomment and edit, then run `npm run config:check` to see the cost preview
-# before using it:
+# The live entry path (DECISIONS §39/§40, paper run per DECISIONS §41 soak
+# test). Example shape below kept for reference:
 #
 # positions:
 #   - address: "<mint>"
@@ -120,4 +119,35 @@ tokens:
 #       timeExitMinutes: 4320     # 3 days
 #       minNetFloorPct: 5         # DECISIONS §40 — reject a tranche netting less than this
 #       maxFixedCostPctOfProceeds: 20   # DECISIONS §40 — reject a tranche too small for its own fixed fee
-positions: []
+#
+# ACTIVE: the paper-trading soak test (DECISIONS §41, one-week minimum).
+# JUP on the same pinned meteora JUP/SOL pool tokens[] above already uses —
+# most validated pool in this project (§24-§31). limitPrice is set ~3%
+# above spot (0.0020454 SOL/JUP observed 2026-08-30) deliberately, so entry
+# fires promptly — this soak tests the EXECUTION machinery, not entry
+# quality (CLAUDE.md: report numbers, never claim profitability). 0.1 SOL
+# buy size: small (mechanism test only), and clears both the 5% net floor
+# and 20% fixed-cost ratio checks on every tranche with comfortable margin
+# — see the config:check output recorded in DECISIONS §41 before this run
+# started.
+positions:
+  - address: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
+    symbol: JUP
+    buyAmountSol: "0.1"
+    limitPrice: 0.0021068
+    pinnedPoolAddress: "C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg"
+    ladder:
+      tranches:
+        - targetGainPct: 10     # sell 40% at +10%
+          sellPct: 40
+        - targetGainPct: 20     # sell 30% at +20%
+          sellPct: 30
+                                 # remaining 30% held, exits only via trailing/stop/time
+      trailing:
+        enabled: true
+        trailPct: 10            # arms once tranche 1 (the +10% target) fills
+      stopLossPct: 15
+      timeExitMinutes: 4320     # 72 hours — soak minimum is 1 week, so this is expected to fire
+                                 # well before the week is up on any position still open that long
+      minNetFloorPct: 5
+      maxFixedCostPctOfProceeds: 20
