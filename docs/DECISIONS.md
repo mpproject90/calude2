@@ -2022,3 +2022,132 @@ resumed position's state checked against what was open just before the
 kill — `paper/store.ts`'s `getOpenPosition` read path is what makes this
 free (§41), but this soak test is the first time it is exercised against
 a real, not synthetic, in-flight position.
+
+## Feed-reliability counters (schema v4), and moving the soak test to a Windows Scheduled Task
+
+Two follow-ups requested once the soak test was already producing real
+feed-error runs: a persistent counter for the price feed's actual
+reliability over the week (not the 3-hour estimate that started this),
+and a deployment that survives sleep/reboot/crash rather than a plain
+detached process. Both landed before the real week-long clock started —
+the first ~15 minutes of feed-error data from the initial foreground run
+was discarded (`data/paper.db` deleted) rather than migrated forward, so
+the counters below start at exactly zero when the scheduled task begins.
+
+**Schema v4** (`src/db/schema.sql`, `SCHEMA_VERSION` bumped to `'4'`) adds
+`paper_feed_stats`: one upserted row per symbol — `usable_count`,
+`stale_count`, `error_count`, `longest_blind_streak_ms`, and
+`blind_streak_started_at` (null when not currently mid-streak). Persisted
+rather than in-memory specifically so a Task Scheduler restart after a
+crash does not reset the count — the whole point of tracking this over a
+week is a number that survives exactly the kind of interruption the
+scheduled task exists to recover from. Not derived from `paper_events` at
+read time: a "usable, nothing happened" tick has no row anywhere else (only
+fills and stale/error events are otherwise recorded), so there is no query
+over existing tables that reconstructs "ticks with a usable price" at all,
+and replaying every event row to compute a running longest-streak over a
+week of 30-second polling would get slower every day it ran. One upserted
+row is O(1) per tick.
+
+**`PaperStore.recordFeedTick`** (`src/paper/store.ts`) folds THREE distinct
+sources of "the stop couldn't see the price" into one continuous blind
+streak, not just in-process feed errors: a stale observation, a feed
+error, AND unexplained wall-clock downtime since the last recorded tick
+(`gapSinceLastTick > normalPollGapMs`, 1.5× the configured poll interval —
+generous slack for one slow HTTP round trip before a gap counts as real
+downtime). The downtime case backdates the streak's start to the last
+known-good tick rather than to "now," so a crash that goes unnoticed for
+20 minutes before Task Scheduler restarts the process counts as a
+20-minute blind window, exactly as it would for the actual stop-loss —
+a real stop is exactly as blind during downtime as during a feed error,
+and undercounting that would defeat the reason this counter exists.
+Longest-streak tracking uses a running max on every blind tick rather than
+waiting for the streak to end, so an ONGOING streak's current length is
+always visible in `getFeedStats`, not just completed ones.
+
+**`paper/runner.ts`'s `tick()` now logs every poll**, not only the ones
+that hit a stale/error/fill — including a previously-silent successful
+"no action needed" tick — each line carrying the running cumulative
+tally: `feed: N ok / M blind (E err, S stale) | longest blind Xmin`. This
+is a deliberate behavior change from the initial delivery above (which
+only logged stale/error/fill events); the point of the counter is a
+number the operator can trust as the real total over a week, and a log
+that goes silent during a long run of quiet, successful ticks would look
+identical to a hung process. The pre-existing runner test asserting zero
+log lines on a quiet tick was updated to assert exactly one line
+containing the price and `feed: 1 ok / 0 blind` instead — this was a
+requested behavior change, not a regression.
+
+**Deployment: Windows Scheduled Task, not a foreground-detached
+process.** The initial soak-test launch (a `Start-Process`-detached
+`cmd → npx → tsx → node` chain, PID rooted outside this chat session) was
+stopped and replaced before the real week started. Registered as task
+`SolBotPaperTrading`:
+- **Trigger**: at logon of the current user. This machine has no admin
+  session available in this build, and a true "run before any user logs
+  in" boot trigger needs either stored credentials or an S4U logon type,
+  both of which require elevation to register — not available here. A
+  plain OS sleep (S3/modern standby) or hibernate does NOT need this at
+  all: Windows suspends the whole process tree and resumes it unchanged,
+  so a bare background process already survives that on its own. What a
+  logon trigger actually buys is recovery from a full shutdown+reboot,
+  which a foreground-detached process cannot survive under any
+  circumstance.
+- **Recovery — NOT `RestartCount`/`RestartInterval`, despite that being
+  the first thing tried.** Verified directly, twice, that Task
+  Scheduler's built-in "restart if it fails" setting does not fire in
+  this environment: registered with `RestartCount=999`/
+  `RestartInterval=1min`, killed the tracked action process, watched for
+  110s and then 240s past the configured interval with no relaunch in
+  either case (`Get-ScheduledTaskInfo` showed `State: Ready`, no
+  `NextRunTime`, no new process). Root cause not conclusively identified —
+  possibly specific to this account's non-elevated `RunLevel Limited`
+  principal, possibly a broader known Task Scheduler limitation — but the
+  fact was confirmed empirically rather than assumed, twice, before being
+  discarded. **Replaced with a trigger that repeats every 5 minutes,
+  indefinitely** (`-Once -At <now> -RepetitionInterval 5min`, no
+  `RepetitionDuration` = repeats forever), relying on
+  `MultipleInstances=IgnoreNew` to make each attempt a no-op while a
+  healthy instance is already running, and a real relaunch when it isn't.
+  This was independently verified working: after a FULLY killed process
+  tree (see the process-tree caveat below), the next scheduled tick
+  relaunched it within 30 seconds. Trade-off stated plainly: a crash can
+  leave the bot dark for up to 5 minutes before self-healing, versus
+  the (unverified, possibly closer to instant) 1-minute figure the
+  broken `RestartCount` setting would have implied if it worked. The
+  feed-stats blind-streak counter (below) captures exactly this kind of
+  downtime rather than hiding it.
+- **A process-tree caveat found while testing the above, worth recording
+  since it cost real time to diagnose**: killing only the top-level
+  action process Task Scheduler itself launches (the outer `cmd.exe`)
+  does NOT kill its descendants on Windows — no automatic process-group
+  propagation like POSIX. The real long-running `node` worker, several
+  processes deep (`cmd → npx(node) → cmd → tsx(node) → node`), survives
+  completely undisturbed underneath a killed ancestor. This produced two
+  misleading "the restart doesn't work" readings before it was caught:
+  Task Scheduler correctly saw ITS OWN child exit and (correctly, as it
+  turned out) attempted recovery, while the actual soak-test process had
+  never stopped polling at all — confirmed by the log showing zero gap
+  across supposed "kill" events. Verifying recovery for real requires
+  recursively killing the whole tree, not just the top-level action PID.
+- **`ExecutionTimeLimit` set to zero (unlimited)** — Task Scheduler's
+  undocumented-to-a-first-glance default kills any task still running
+  after 3 days, which would have silently ended a 1-week soak test
+  exactly like the failure mode this migration exists to prevent. Caught
+  before registering, not after finding a mysteriously-stopped week-3
+  run.
+- **`MultipleInstances IgnoreNew`** — if the logon trigger fires while an
+  instance is already running (e.g. a manual `Start-ScheduledTask` right
+  before a logon event), the new attempt is dropped rather than starting
+  a second writer against the same SQLite file.
+- **Log redirect changed from `>` to `>>`** (append) in the task's action
+  command — a restart under the old truncating redirect would have wiped
+  the week's log history on every recovery, defeating the log-based
+  visibility the feed counters above were built for.
+- **`Stop-ScheduledTask` alone does not permanently stop it** — since
+  recovery is now a periodic trigger, not a failure-triggered one, a
+  plain stop just gets relaunched at the next 5-minute tick, by design.
+  Actually stopping it for good requires `Disable-ScheduledTask` (keeps
+  the registration, stops it firing) or `Unregister-ScheduledTask`
+  (removes it entirely) — both documented in STATUS.md's "How to check /
+  stop it".

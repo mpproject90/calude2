@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { mkdirSync } from 'node:fs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const SCHEMA_VERSION = '3';
+export const SCHEMA_VERSION = '4';
 
 export type Db = Database.Database;
 

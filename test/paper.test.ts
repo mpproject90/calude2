@@ -317,6 +317,90 @@ describe('PaperStore (DECISIONS §41) — mutable position state + immutable fil
   });
 });
 
+describe('PaperStore.recordFeedTick/getFeedStats (DECISIONS §41) — cumulative feed reliability, persisted', () => {
+  function newStore(): PaperStore {
+    return new PaperStore(openDb(':memory:'));
+  }
+  const GAP = 45_000;   // > 30s * 1.5 normalPollGapMs used in these tests
+
+  it('starts at zero for a symbol with no recorded ticks', () => {
+    const store = newStore();
+    const stats = store.getFeedStats('JUP');
+    expect(stats).toMatchObject({
+      usableCount: 0, staleCount: 0, errorCount: 0,
+      blindStreakStartedAt: null, longestBlindStreakMs: 0, lastTickAt: null,
+    });
+  });
+
+  it('counts a usable tick and leaves the blind streak untouched', () => {
+    const store = newStore();
+    const stats = store.recordFeedTick({ symbol: 'JUP', outcome: 'usable', nowMs: T0, normalPollGapMs: GAP });
+    expect(stats.usableCount).toBe(1);
+    expect(stats.errorCount).toBe(0);
+    expect(stats.blindStreakStartedAt).toBeNull();
+    expect(stats.longestBlindStreakMs).toBe(0);
+  });
+
+  it('starts a blind streak on the first error tick and grows it on consecutive ones', () => {
+    const store = newStore();
+    store.recordFeedTick({ symbol: 'JUP', outcome: 'error', nowMs: T0, normalPollGapMs: GAP });
+    const s2 = store.recordFeedTick({ symbol: 'JUP', outcome: 'error', nowMs: T0 + 30_000, normalPollGapMs: GAP });
+    expect(s2.errorCount).toBe(2);
+    expect(s2.blindStreakStartedAt).toBe(T0);
+    expect(s2.longestBlindStreakMs).toBe(30_000);
+    const s3 = store.recordFeedTick({ symbol: 'JUP', outcome: 'stale', nowMs: T0 + 90_000, normalPollGapMs: GAP });
+    expect(s3.staleCount).toBe(1);
+    expect(s3.longestBlindStreakMs).toBe(90_000);   // mixed error+stale still one continuous streak
+  });
+
+  it('ends the streak on a usable tick, keeping the longest-so-far recorded', () => {
+    const store = newStore();
+    store.recordFeedTick({ symbol: 'JUP', outcome: 'error', nowMs: T0, normalPollGapMs: GAP });
+    store.recordFeedTick({ symbol: 'JUP', outcome: 'error', nowMs: T0 + 5 * MIN, normalPollGapMs: GAP });
+    const ended = store.recordFeedTick({ symbol: 'JUP', outcome: 'usable', nowMs: T0 + 6 * MIN, normalPollGapMs: GAP });
+    expect(ended.blindStreakStartedAt).toBeNull();
+    expect(ended.longestBlindStreakMs).toBe(6 * MIN);   // streak ran from T0 to the usable tick that ended it
+    expect(ended.longestBlindStreakEndedAt).toBe(T0 + 6 * MIN);
+
+    // a later, SHORTER blind spell must not overwrite the longer historical max
+    store.recordFeedTick({ symbol: 'JUP', outcome: 'error', nowMs: T0 + 7 * MIN, normalPollGapMs: GAP });
+    const shorter = store.recordFeedTick({ symbol: 'JUP', outcome: 'usable', nowMs: T0 + 7 * MIN + 60_000, normalPollGapMs: GAP });
+    expect(shorter.longestBlindStreakMs).toBe(6 * MIN);   // unchanged — the 1-minute spell was shorter
+  });
+
+  it('folds unexplained downtime (a crash-to-restart gap) into the blind streak, not just in-process errors', () => {
+    const store = newStore();
+    store.recordFeedTick({ symbol: 'JUP', outcome: 'usable', nowMs: T0, normalPollGapMs: GAP });
+    // simulate a process restart 20 minutes later with no ticks recorded in between —
+    // the gap itself, backdated to the last known-good tick, becomes the blind streak
+    const afterGap = store.recordFeedTick({ symbol: 'JUP', outcome: 'usable', nowMs: T0 + 20 * MIN, normalPollGapMs: GAP });
+    expect(afterGap.longestBlindStreakMs).toBe(20 * MIN);
+    expect(afterGap.blindStreakStartedAt).toBeNull();   // this tick is usable, so the streak already closed
+  });
+
+  it('persists across a fresh PaperStore on the same db file (survives a real restart)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'paper-feedstats-'));
+    const dbPath = join(dir, 'paper.db');
+    try {
+      const db1 = openDb(dbPath);
+      const store1 = new PaperStore(db1);
+      store1.recordFeedTick({ symbol: 'JUP', outcome: 'error', nowMs: T0, normalPollGapMs: GAP });
+      store1.recordFeedTick({ symbol: 'JUP', outcome: 'error', nowMs: T0 + 10 * MIN, normalPollGapMs: GAP });
+      db1.close();
+
+      const db2 = openDb(dbPath);
+      const store2 = new PaperStore(db2);
+      const resumed = store2.getFeedStats('JUP');
+      expect(resumed.errorCount).toBe(2);
+      expect(resumed.longestBlindStreakMs).toBe(10 * MIN);
+      expect(resumed.blindStreakStartedAt).toBe(T0);   // still mid-streak — the count was not reset by the restart
+      db2.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 function testPosition(over: Record<string, unknown> = {}): ManualPositionConfig {
   return parseConfig({
     global: {}, tokens: [],
@@ -351,12 +435,14 @@ describe('tick (DECISIONS §41) — runner integration, same rule-evaluation cod
     return { db, store, logs, baseDeps };
   }
 
-  it('does nothing while price is above the limit — no position, no log', async () => {
+  it('does nothing while price is above the limit — no entry, but the tick is still logged (feed stats, DECISIONS §41)', async () => {
     const { store, logs, baseDeps } = harness();
     const deps: TickDeps = { ...baseDeps, feed: fixedFeed(101, T0), now: () => T0 };
     await tick(testPosition(), deps);
     expect(store.getOpenPosition('JUP')).toBeNull();
-    expect(logs).toHaveLength(0);
+    expect(logs).toHaveLength(1);
+    expect(logs[0]).toContain('price 101');
+    expect(logs[0]).toContain('feed: 1 ok / 0 blind');
   });
 
   it('fills the entry at the ask (worse than mid), opens the position, records the fill', async () => {
@@ -490,5 +576,26 @@ describe('tick (DECISIONS §41) — runner integration, same rule-evaluation cod
     await tick(position, resumedDeps);
     expect(freshStore.getOpenPosition('JUP')).toBeNull();   // both tranches filled -> closed
     expect(freshLogs.some((l) => l.includes('TAKE_PROFIT FILLED') && l.includes('CLOSED'))).toBe(true);
+  });
+
+  it('feeds cumulative feed-stats tallies through to the log on every tick (DECISIONS §41)', async () => {
+    const { store, logs, baseDeps } = harness();
+    const position = testPosition();
+
+    await tick(position, { ...baseDeps, feed: throwingFeed('boom'), now: () => T0 });
+    expect(logs[0]).toContain('feed: 0 ok / 1 blind (1 err, 0 stale)');
+
+    await tick(position, { ...baseDeps, feed: throwingFeed('boom'), now: () => T0 + 30_000 });
+    expect(logs[1]).toContain('feed: 0 ok / 2 blind (2 err, 0 stale)');
+    expect(logs[1]).toContain('longest blind 0.5min');
+
+    // price is above the limit so this stays a quiet, no-action tick — must still be counted
+    await tick(position, { ...baseDeps, feed: fixedFeed(101, T0 + 60_000), now: () => T0 + 60_000 });
+    expect(logs[2]).toContain('feed: 1 ok / 2 blind (2 err, 0 stale)');
+
+    const finalStats = store.getFeedStats('JUP');
+    expect(finalStats.usableCount).toBe(1);
+    expect(finalStats.errorCount).toBe(2);
+    expect(finalStats.longestBlindStreakMs).toBe(60_000);   // streak ran from tick 1 (T0) to tick 3's usable observation
   });
 });

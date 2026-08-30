@@ -76,6 +76,20 @@ export interface RecordEventInput {
   readonly occurredAt: number;
 }
 
+export type FeedTickOutcome = 'usable' | 'stale' | 'error';
+
+export interface FeedStats {
+  readonly symbol: string;
+  readonly usableCount: number;
+  readonly staleCount: number;
+  readonly errorCount: number;
+  /** null when the feed is not currently in a blind streak. */
+  readonly blindStreakStartedAt: number | null;
+  readonly longestBlindStreakMs: number;
+  readonly longestBlindStreakEndedAt: number | null;
+  readonly lastTickAt: number | null;
+}
+
 function amountOrNull(a: TokenAmount | null): string | null {
   return a === null ? null : a.raw.toString();
 }
@@ -134,6 +148,95 @@ export class PaperStore {
     this.db.prepare(
       `INSERT INTO paper_events (symbol, kind, detail, occurred_at) VALUES (?,?,?,?)`,
     ).run(input.symbol, input.kind, input.detail, input.occurredAt);
+  }
+
+  private readFeedStats(symbol: string): FeedStats {
+    const row = this.db
+      .prepare<[string], {
+        symbol: string; usableCount: number; staleCount: number; errorCount: number;
+        blindStreakStartedAt: number | null; longestBlindStreakMs: number;
+        longestBlindStreakEndedAt: number | null; lastTickAt: number | null;
+      }>(
+        `SELECT symbol, usable_count AS "usableCount", stale_count AS "staleCount",
+                error_count AS "errorCount", blind_streak_started_at AS "blindStreakStartedAt",
+                longest_blind_streak_ms AS "longestBlindStreakMs",
+                longest_blind_streak_ended_at AS "longestBlindStreakEndedAt",
+                last_tick_at AS "lastTickAt"
+         FROM paper_feed_stats WHERE symbol = ?`,
+      )
+      .get(symbol);
+    if (row !== undefined) return row;
+    return {
+      symbol, usableCount: 0, staleCount: 0, errorCount: 0,
+      blindStreakStartedAt: null, longestBlindStreakMs: 0, longestBlindStreakEndedAt: null, lastTickAt: null,
+    };
+  }
+
+  /**
+   * Cumulative price-feed reliability tallies (DECISIONS §41), one upserted
+   * row per symbol so a Task Scheduler restart never resets the count. A gap
+   * since the last recorded tick larger than `normalPollGapMs` (the task was
+   * down between a crash and its restart, not just a slow poll) counts
+   * toward the blind streak too — a stop is exactly as blind during downtime
+   * as during an in-process feed error.
+   */
+  recordFeedTick(input: {
+    symbol: string; outcome: FeedTickOutcome; nowMs: number; normalPollGapMs: number;
+  }): FeedStats {
+    const { symbol, outcome, nowMs, normalPollGapMs } = input;
+    const existing = this.readFeedStats(symbol);
+
+    let blindStreakStartedAt = existing.blindStreakStartedAt;
+    let longestBlindStreakMs = existing.longestBlindStreakMs;
+    let longestBlindStreakEndedAt = existing.longestBlindStreakEndedAt;
+    let { usableCount, staleCount, errorCount } = existing;
+
+    const gapSinceLastTick = existing.lastTickAt === null ? 0 : nowMs - existing.lastTickAt;
+    if (gapSinceLastTick > normalPollGapMs && blindStreakStartedAt === null) {
+      // Unexplained downtime since the last tick, and we were not already
+      // mid-streak — the gap itself becomes the start of a blind streak,
+      // backdated to the last moment we actually had a price.
+      blindStreakStartedAt = existing.lastTickAt;
+    }
+
+    if (outcome === 'usable') {
+      if (blindStreakStartedAt !== null) {
+        const duration = nowMs - blindStreakStartedAt;
+        if (duration > longestBlindStreakMs) { longestBlindStreakMs = duration; longestBlindStreakEndedAt = nowMs; }
+      }
+      blindStreakStartedAt = null;
+      usableCount += 1;
+    } else {
+      if (blindStreakStartedAt === null) blindStreakStartedAt = nowMs;
+      const duration = nowMs - blindStreakStartedAt;
+      if (duration > longestBlindStreakMs) { longestBlindStreakMs = duration; longestBlindStreakEndedAt = nowMs; }
+      if (outcome === 'stale') staleCount += 1; else errorCount += 1;
+    }
+
+    const next: FeedStats = {
+      symbol, usableCount, staleCount, errorCount,
+      blindStreakStartedAt, longestBlindStreakMs, longestBlindStreakEndedAt, lastTickAt: nowMs,
+    };
+    this.db.prepare(
+      `INSERT INTO paper_feed_stats
+         (symbol, usable_count, stale_count, error_count, blind_streak_started_at,
+          longest_blind_streak_ms, longest_blind_streak_ended_at, last_tick_at, updated_at)
+       VALUES (?,?,?,?,?,?,?,?,?)
+       ON CONFLICT(symbol) DO UPDATE SET
+         usable_count = excluded.usable_count, stale_count = excluded.stale_count,
+         error_count = excluded.error_count, blind_streak_started_at = excluded.blind_streak_started_at,
+         longest_blind_streak_ms = excluded.longest_blind_streak_ms,
+         longest_blind_streak_ended_at = excluded.longest_blind_streak_ended_at,
+         last_tick_at = excluded.last_tick_at, updated_at = excluded.updated_at`,
+    ).run(
+      symbol, usableCount, staleCount, errorCount, blindStreakStartedAt,
+      longestBlindStreakMs, longestBlindStreakEndedAt, nowMs, nowMs,
+    );
+    return next;
+  }
+
+  getFeedStats(symbol: string): FeedStats {
+    return this.readFeedStats(symbol);
   }
 
   /** Every currently-open position — this is what a restart resumes from. */

@@ -19,6 +19,10 @@
 -- shaped for the phase-1 indicator-driven, single-fill, candle-indexed
 -- position model and does not fit the new price-triggered, multi-tranche,
 -- wall-clock one.
+--
+-- v3 -> v4 (DECISIONS §41): paper_feed_stats added — cumulative
+-- usable-vs-blind price-feed tallies and the longest blind streak, per
+-- symbol, persisted so a Task Scheduler restart doesn't reset the count.
 
 PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
@@ -227,3 +231,33 @@ CREATE TABLE IF NOT EXISTS paper_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_paper_events_kind ON paper_events (kind, occurred_at);
+
+-- ============================================================ v4 (§41) ===
+-- Cumulative price-feed reliability counters, one row per symbol.
+-- Deliberately NOT derived from paper_events at read time: a "usable,
+-- nothing happened" tick has no other row anywhere (only fills and
+-- stale/error events are otherwise recorded), so there is no query over
+-- existing tables that reconstructs "ticks with a usable price" at all,
+-- and a query that DID replay every event row to compute a running
+-- longest-blind-streak over a week of 30s polling would grow slower every
+-- day it ran. A single upserted row is O(1) per tick, forever.
+--
+-- Persisted (not in-memory) specifically so a Task Scheduler restart after
+-- a crash does not reset the count back to zero — the whole point of
+-- tracking this over a week is a number the operator can trust survives
+-- exactly the kind of interruption the scheduled task exists to recover
+-- from. `blind_streak_started_at` also lets a gap in wall-clock time
+-- itself (the task was down between the crash and the restart) count
+-- toward the blind streak, not just in-process feed errors — a real stop
+-- is exactly as blind during downtime as during a feed error.
+CREATE TABLE IF NOT EXISTS paper_feed_stats (
+  symbol                        TEXT    PRIMARY KEY,
+  usable_count                  INTEGER NOT NULL DEFAULT 0,
+  stale_count                   INTEGER NOT NULL DEFAULT 0,
+  error_count                   INTEGER NOT NULL DEFAULT 0,
+  blind_streak_started_at       INTEGER,   -- NULL when not currently in a blind streak
+  longest_blind_streak_ms       INTEGER NOT NULL DEFAULT 0,
+  longest_blind_streak_ended_at INTEGER,
+  last_tick_at                  INTEGER,
+  updated_at                    INTEGER NOT NULL
+) WITHOUT ROWID;

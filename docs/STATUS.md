@@ -133,10 +133,76 @@ size sweep that picked 0.1 SOL are in DECISIONS §41. Config is the live
 **Known going in, not bugs**: this pool's 1-minute bars are sparse (12 of
 180 possible bars had a trade in a 3h sample, median gap 9 min, max 55
 min) — expect frequent `feed_error` events on individual polls, by
-design (fail-closed). No cooldown is wired into the paper path, so a
-closed position will likely re-enter immediately if price is still below
-the limit — expected to produce multiple entry-to-exit cycles over the
-week rather than one.
+design (fail-closed). **This is now measured continuously, not
+estimated**: schema v4 added `paper_feed_stats` (DECISIONS §41
+follow-up), a persistent per-symbol counter of usable vs. blind ticks
+and the longest continuous blind streak — printed on every single log
+line so the running total is always visible, and it folds in downtime
+between a crash and a Task Scheduler restart, not just in-process feed
+errors, since the stop-loss is exactly as blind either way. **If the
+longest blind streak ever approaches or exceeds the −15% stop's realistic
+overshoot tolerance, that is the finding this soak test exists to
+surface** — read as a property of this pool/feed, not a code defect; the
+resolution, if needed, is a different price source or a different token,
+decided by the operator at review.
+
+**Decide before live, not now**: no cooldown between a position closing
+and the next entry is wired into the paper path (`portfolio.ts`'s
+`cooldownCandlesAfterLoss` is phase-1/candle-indexed and is never called
+from `paper/runner.ts`). Deliberately left as-is for this soak test —
+multiple entry-to-exit cycles in one week is useful data, not a bug — but
+a live deployment needs an explicit decision on whether some cooldown
+belongs in the price-triggered path before real capital is at risk.
+
+**Deployment: Windows Scheduled Task (`SolBotPaperTrading`), not a
+foreground process** — converted before the real week-long clock started,
+because plain OS sleep already survives on its own (the whole process
+tree is suspended and resumes unchanged) but a full shutdown+reboot does
+not. Self-heals from a crash within 5 minutes via a periodic re-attempt
+trigger, not Task Scheduler's built-in "restart if it fails" setting —
+that was tried first and confirmed NOT to fire in this environment before
+being replaced. See "How to check / stop it" below and DECISIONS §41 for
+the full story, including the execution-time-limit trap (defaults to 3
+days, set to unlimited) and a process-tree gotcha worth knowing before
+anyone else tests this by hand.
+
+### How to check / stop it
+
+```powershell
+# status
+Get-ScheduledTask -TaskName 'SolBotPaperTrading' | Select-Object State
+Get-ScheduledTaskInfo -TaskName 'SolBotPaperTrading'
+
+# tail the log (cumulative feed tallies are on every line)
+Get-Content 'C:\Users\mizu\calude2\data\paper-run.log' -Tail 20
+
+# confirm the actual process, not just Task Scheduler's own bookkeeping
+Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*src/cli/paper.ts*' }
+
+# stop it for good (Stop-ScheduledTask alone is NOT enough — the periodic
+# trigger will just relaunch it within 5 minutes, by design; either disable
+# or unregister to actually stop it)
+Stop-ScheduledTask -TaskName 'SolBotPaperTrading'
+Disable-ScheduledTask -TaskName 'SolBotPaperTrading'    # keeps the task, stops it from ever firing again
+# — or, to remove it entirely —
+Unregister-ScheduledTask -TaskName 'SolBotPaperTrading' -Confirm:$false
+```
+
+**A real finding from setting this up, not a footnote**: Task Scheduler's
+built-in "restart the task if it fails" (`RestartCount`/`RestartInterval`)
+was tried first and does NOT fire in this environment — verified directly
+by killing the tracked process twice and watching for 110s and 240s past
+the configured 1-minute interval with no relaunch. The task actually
+running now uses a different, independently-verified mechanism instead: a
+trigger that re-attempts launch every 5 minutes indefinitely, with
+`MultipleInstances=IgnoreNew` making that a no-op while an instance is
+already healthy and a real relaunch when it isn't. Confirmed working
+end-to-end: a fully-killed process tree came back within 30 seconds of the
+next scheduled tick. One genuine worst case this implies: a crash could
+leave the bot dark for **up to 5 minutes** before it self-heals — the
+feed-stats counter below folds exactly this kind of downtime into the
+blind-streak measurement, so it will show up in the numbers rather than
+being invisible.
 
 **Soak minimum: one week.** What step 9's review needs, per operator
 direction:

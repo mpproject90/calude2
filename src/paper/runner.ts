@@ -31,7 +31,7 @@ import { evaluatePositionSize } from '../filters/positionSize.js';
 import { evaluateCostFloor } from '../filters/costFloor.js';
 import { simulateEntryFill, tranchePnl } from './simulator.js';
 import { isStale, type PriceFeed } from './priceFeed.js';
-import { PaperStore, type PersistedPaperPosition } from './store.js';
+import { PaperStore, type PersistedPaperPosition, type FeedStats } from './store.js';
 import { sol } from '../util/amount.js';
 
 export interface TickDeps {
@@ -45,6 +45,23 @@ export interface TickDeps {
   readonly poolLiquiditySol: number | null;
 }
 
+function formatDuration(ms: number): string {
+  const minutes = ms / 60_000;
+  return minutes < 60 ? `${minutes.toFixed(1)}min` : `${(minutes / 60).toFixed(2)}h`;
+}
+
+/**
+ * Cumulative feed-reliability summary, appended to every tick's log line
+ * (DECISIONS §41) — a pool-quality finding for the operator to weigh, not a
+ * code diagnostic. "Longest blind" is the real number the −15% hard stop
+ * could have been unable to see the price for, over the whole run,
+ * including any downtime between a crash and a Task Scheduler restart.
+ */
+function formatFeedStats(stats: FeedStats): string {
+  const blind = stats.staleCount + stats.errorCount;
+  return `feed: ${stats.usableCount} ok / ${blind} blind (${stats.errorCount} err, ${stats.staleCount} stale) | longest blind ${formatDuration(stats.longestBlindStreakMs)}`;
+}
+
 function poolAddressFor(position: ManualPositionConfig): string {
   if (position.pinnedPoolAddress === undefined) {
     throw new Error(
@@ -56,23 +73,39 @@ function poolAddressFor(position: ManualPositionConfig): string {
   return position.pinnedPoolAddress;
 }
 
+/**
+ * A tick's poll normally takes seconds, not minutes — 1.5x the configured
+ * poll interval is generous slack for one slow HTTP round trip before a gap
+ * counts as real downtime (a crash, a sleeping machine, a Task Scheduler
+ * restart) rather than ordinary jitter.
+ */
+const DOWNTIME_GAP_MULTIPLIER = 1.5;
+
 async function observePrice(
   position: ManualPositionConfig, poolAddress: string, deps: TickDeps,
 ): Promise<{ price: number; timestamp: number } | null> {
   const nowMs = deps.now();
+  const normalPollGapMs = deps.global.stopPollSeconds * 1000 * DOWNTIME_GAP_MULTIPLIER;
+  const tally = (outcome: 'usable' | 'stale' | 'error'): FeedStats =>
+    deps.store.recordFeedTick({ symbol: position.symbol, outcome, nowMs, normalPollGapMs });
+
   try {
     const obs = await deps.feed.getPrice(poolAddress);
     if (isStale(obs, nowMs, deps.staleAfterMs)) {
+      const stats = tally('stale');
       const detail = `last observation ${((nowMs - obs.timestamp) / 60_000).toFixed(1)} minutes old ` +
         `(threshold ${(deps.staleAfterMs / 60_000).toFixed(1)}m) — refusing to act`;
-      deps.log(`[${position.symbol}] STALE FEED: ${detail}`);
+      deps.log(`[${position.symbol}] STALE FEED: ${detail} — ${formatFeedStats(stats)}`);
       deps.store.recordEvent({ symbol: position.symbol, kind: 'stale_feed', detail, occurredAt: nowMs });
       return null;
     }
+    const stats = tally('usable');
+    deps.log(`[${position.symbol}] price ${obs.price} — ${formatFeedStats(stats)}`);
     return obs;
   } catch (err) {
+    const stats = tally('error');
     const detail = err instanceof Error ? err.message : String(err);
-    deps.log(`[${position.symbol}] FEED ERROR: ${detail}`);
+    deps.log(`[${position.symbol}] FEED ERROR: ${detail} — ${formatFeedStats(stats)}`);
     deps.store.recordEvent({ symbol: position.symbol, kind: 'feed_error', detail, occurredAt: nowMs });
     return null;
   }
