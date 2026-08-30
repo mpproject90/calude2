@@ -18,7 +18,8 @@
     "data:cex-study": "tsx src/cli/cex-study.ts",
     "data:cex-backtest": "tsx src/cli/cex-backtest.ts",
     "backtest": "tsx src/cli/backtest.ts",
-    "paper": "tsx src/cli/paper.ts"
+    "paper": "tsx src/cli/paper.ts",
+    "live": "tsx src/cli/live.ts"
   },
   "dependencies": {
     "@solana/web3.js": "^1.98.4",

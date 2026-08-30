@@ -2326,3 +2326,217 @@ stopped and replaced before the real week started. Registered as task
   the registration, stops it firing) or `Unregister-ScheduledTask`
   (removes it entirely) — both documented in STATUS.md's "How to check /
   stop it".
+
+## 42. Phase 3 execution layer: built now, unlocked later — CLAUDE.md's gate updated
+
+**The gate, restated precisely, because the wording changed**: CLAUDE.md's
+hard rule used to read "there is no execution layer, do not build one."
+Operator direction: build the CODE in parallel with the phase 2 soak, so
+the soak's eventual clean review isn't a standing start — but nothing may
+be ENABLED until that review happens and the operator explicitly
+approves. Building and unlocking are different things; the rule now
+governs unlocking specifically, enforced structurally (below), not by
+convention. This is not a weakening — the risk the original rule guarded
+against (money moving before validation) is still fully blocked; only the
+"code may not exist" clause, which was never actually the risk, is gone.
+
+**Scope, as specified**: Jupiter swap execution, a slippage cap enforced
+per swap with abort-rather-than-accept, dynamic priority fee estimation,
+transaction confirmation with explicit handling of dropped transactions
+and expired blockhashes, balance reconciliation on startup and
+periodically, and a kill switch. One additional explicit design
+constraint from the operator: **a transaction that cannot be confirmed
+must be treated as unknown state — halt and alert, never retry blindly**
+(a double-spent buy from resubmitting an unconfirmed transaction is the
+exact failure this guards against). Everything below was built to that
+constraint specifically, not as an afterthought bolted on.
+
+**New dependency**: `@solana/web3.js@1.98.4` (the classic, stable SDK —
+matches Jupiter's own documented examples) plus `bs58@^4.0.1` for
+secret-key decoding (no shipped types at 4.x; a small local ambient
+declaration, `src/types/bs58.d.ts`, covers the two functions used).
+`npm audit` flags two transitive issues from this dependency tree — an
+esbuild dev-server exposure (via vitest's own toolchain, unrelated to
+this change) and a `uuid<11` buffer-bounds issue via `jayson`, a
+long-standing, still-unresolved issue in `@solana/web3.js`'s own RPC
+client dependency. Both are known, low-real-world-risk for this
+offline/local build; `npm audit fix --force` would downgrade
+`@solana/web3.js` to nothing and force a major `vitest` bump — not done
+without being asked.
+
+### `src/execution/` — one module per concern, each independently tested
+
+- **`wallet.ts`** — `loadWalletFromEnv` reads `WALLET_PRIVATE_KEY`
+  (base58, `.env.example`) ONLY — never config, never logged. Errors wrap
+  the underlying cause but never echo the raw key back, tested explicitly
+  (a test asserts a fake "secret" never appears in a thrown message).
+
+- **`rpcClient.ts`** — a minimal `RpcClient` interface (balance queries,
+  blockhash, block height, raw-transaction submission, signature status)
+  over the real `@solana/web3.js` `Connection` — same injection pattern as
+  `FetchFn` elsewhere in this codebase (GeckoTerminal, the Jupiter quote
+  feed): every execution module depends on the INTERFACE, so nothing in
+  this delivery's test suite touches a real network or a real wallet.
+  `sendRawTransaction` is called with `skipPreflight: true, maxRetries:
+  0` — Jupiter's own documented guidance, and necessary here specifically
+  because `confirmation.ts` runs its OWN retry/confirmation logic; the
+  RPC's built-in retry would resubmit blindly, exactly what the "never
+  retry blindly" constraint forbids.
+
+- **`gate.ts`** — `LiveExecutionUnlock`, a capability-token pattern: its
+  constructor is PRIVATE, so the only way to obtain an instance is
+  `LiveExecutionUnlock.acquire()`, which checks `LIVE_TRADING === 'true'`
+  (exact string, existing convention) AND an interactive confirmation
+  together — the env check runs FIRST and the confirmation prompt is
+  never even shown if it fails (tested explicitly: `promptCalled` stays
+  `false`). `executeSwap` (`jupiterSwap.ts`) requires an unlock instance
+  as a parameter. This is enforced by the TYPE SYSTEM, not a runtime
+  convention some future edit could accidentally route around — a call
+  site with no valid unlock simply does not compile, because nothing
+  outside `gate.ts` can construct one.
+
+- **`jupiterSwap.ts`** — `getExecutionQuote` fetches a FRESH quote at
+  execution time, deliberately never reusing the paper runner's
+  pricing-only quote (price can move between a trigger check and the
+  moment of execution, and Jupiter's `/swap` endpoint needs the exact
+  `quoteResponse` object from `/quote` verbatim anyway).
+  `assertWithinSlippageCap` — the ABORT-not-accept requirement, literally:
+  throws `SlippageCapExceededError` before anything is built or submitted
+  if the fresh quote's real measured impact exceeds
+  `global.execution.maxSlippageCapPct`. `buildSwapTransaction` requests
+  Jupiter's own dynamic priority-fee estimator
+  (`prioritizationFeeLamports.priorityLevelWithMaxLamports`, `priorityLevel:
+  'high'`) capped at `global.execution.maxPriorityFeeLamports` — real
+  per-slot congestion data Jupiter already tracks, with OUR hard ceiling
+  on top, rather than a hand-rolled `getRecentPrioritizationFees`
+  heuristic. `executeSwap` composes all of this — quote, cap check, build,
+  sign, submit — and returns the signature WITHOUT waiting for
+  confirmation; submission and confirmation are deliberately two separate
+  steps (below), because conflating "sent" with "confirmed" is exactly
+  the class of bug the next module exists to prevent.
+
+- **`confirmation.ts`** — THREE outcomes, not two, and this is the
+  module the operator's explicit design note was aimed at:
+  `{kind:'confirmed', success:true}`, `{kind:'confirmed', success:false,
+  err}` (landed on-chain and failed — e.g. an on-chain slippage check
+  rejected it; still a DEFINITIVE, known result), and `{kind:'unknown',
+  reason}` (the blockhash expired, or polling exhausted its budget,
+  before any definitive signature status was ever observed). `unknown` is
+  never conflated with failure — a confirmation response can be lost even
+  when the underlying transaction succeeded, so treating "no status yet"
+  as "it failed" would be just as wrong as treating it as "it succeeded."
+  A transient RPC error while merely CHECKING status is treated as
+  neither expiry nor success — polling continues (tested: 2 consecutive
+  `ECONNRESET`s on `getSignatureStatus` do not derail a confirmation that
+  succeeds on the 3rd check). Every caller of `confirmSwap` in
+  `liveRunner.ts` treats `unknown` identically: halt everything (not just
+  this position) and alert — never resubmit.
+
+- **`balanceReconciliation.ts`** — compares on-chain SOL/token balances
+  for the wallet against what the internal ledger expects, reports
+  mismatches beyond a configurable tolerance (real fee/rent dust is not
+  an error), never auto-corrects. Run once at startup (a mismatch refuses
+  to start the live CLI at all) and then every
+  `global.execution.balanceReconcileIntervalMinutes`.
+
+- **`killSwitch.ts`** — deliberately the simplest possible mechanism: a
+  file whose mere presence halts every future swap attempt, checked fresh
+  at the top of every `liveTick()` call, before the price feed or the
+  store is even touched. No daemon, no network call, nothing that can
+  itself go stale or get bypassed by a crash. Engaging it is one line
+  (`engageKillSwitch`); disengaging requires manually deleting the file —
+  deliberately not automated.
+
+### `src/execution/liveRunner.ts` — same rules, same store, real fills
+
+`liveTick()` reuses `evaluateLimitEntry`, `evaluateLadderExit`,
+`evaluatePositionSize`, `evaluateCostFloor`, `impliedPoolLiquiditySol`,
+and `buildQuoteRequest` from `paper/runner.ts` UNCHANGED (all four of the
+latter two are now exported specifically for this reuse) — CLAUDE.md's
+"one strategy implementation" rule, extended: if paper and live ever
+disagreed about WHETHER to trade, it could only be because of a bug, not
+a design choice, because they call the identical functions.
+`PaperStore` is ALSO reused unchanged for persistence: a position's shape
+(SOL-value-tracked, ladder-based) doesn't depend on whether its fill was
+simulated or real, only the DATABASE FILE differs (`data/live.db`, never
+`data/paper.db` — sharing a file would let a live position be misread as
+paper or vice versa, so the two must never point at the same path).
+
+**A cheap trigger-check quote (the same `PriceFeed`/`JupiterQuoteFeed`
+paper already uses) drives entry/exit evaluation every tick, but is NEVER
+what's actually traded against** — `executeSwap` always fetches its own
+fresh quote at the moment of execution. This means the position-size
+cap's `impliedPoolLiquiditySol` derivation (§41 second follow-up) is
+computed from the CHEAP quote's impact figure, a real but slightly
+earlier measurement than what execution will actually see — acceptable
+because `executeSwap`'s OWN slippage cap check re-verifies against a
+fresh quote regardless, so a stale trigger-quote impact figure can only
+ever make the entry MORE conservative (approve a slightly-too-small
+size) or get caught by the real check at execution time, never let
+through something the fresh check would have rejected.
+
+**A real correctness bug caught before this shipped, not after**: the
+first draft copied paper's `tryExit` structure directly — updating
+`remainingSizeSol`/`filledTrancheCount` to the POST-trigger state
+unconditionally, before the swap even executes. That is correct for
+paper (the "fill" is simulated, always succeeds, `nextState` IS the
+ground truth) but wrong for live: a trigger firing is only an INTENTION
+until the swap confirms, and if the swap fails or comes back UNKNOWN,
+the ledger would show less than what is still actually held on-chain.
+Fixed by splitting the update: `peakPrice`/`trailingArmed` persist
+immediately (they track what price was OBSERVED, correct regardless of
+whether a trade happens), while `remainingSizeSol`/`filledTrancheCount`
+are deferred and only committed after `confirmSwap` returns
+`{kind:'confirmed', success:true}` — tested explicitly (a seeded open
+position's `remainingSizeSol` is asserted UNCHANGED after a swap that
+fails on-chain).
+
+**Token quantity vs. SOL value, threaded through carefully**: this
+system tracks position size as a SOL VALUE (§39), but a sell-side quote
+needs a real TOKEN quantity. For the trigger-check quote this was already
+solved (`remainingTokenRaw`, §41 follow-up); for the ACTUAL execution
+amount, the same formula applies to the TRANCHE being sold
+(`trigger.sizeSol.toNumberUnsafe() / open.entryPrice`), not the full
+remaining position, since a trigger may be a partial tranche. The
+RECORDED fill price after confirmation uses the swap's REAL returned
+amounts (`executed.quote.inAmountRaw`/`outAmountRaw`), not the rule
+engine's pre-trade target level (`trigger.fillPrice`) — what actually
+happened, not what was aimed at. Per-fill fee attribution (dex fee vs.
+priority fee split) is recorded as zero/unmodeled for live fills,
+stated explicitly, not silently: the real source of truth for what a
+fill actually cost is on-chain balance reconciliation, not a modeled
+breakdown the way `simulateEntryFill` provides for paper — there is
+nothing to simulate once a real fill has already happened.
+
+### `src/cli/live.ts` — every gate checked in order, verified empirically
+
+`npm run live` — `LIVE_TRADING=true npm run live -- --config
+config/default.yaml --db data/live.db`. Gate order, each one verified by
+actually running the CLI against deliberately-incomplete environments
+(not just asserted in tests): (1) `global.mode !== 'live'` refuses
+immediately — `assertLiveTradingAllowed` alone is NOT sufficient here,
+since it's a NO-OP for non-live modes by design (it exists to gate OTHER
+callers that merely accept a config claiming live mode); this CLI's
+whole purpose IS live trading, so mode is checked explicitly, a real gap
+caught by testing the CLI directly rather than trusting the pre-existing
+function's name. (2) `assertLiveTradingAllowed` — `LIVE_TRADING=true`.
+(3) `SOLANA_RPC_URL` must be set. (4) `WALLET_PRIVATE_KEY` must load a
+valid keypair. (5) the interactive confirmation phrase
+(`I UNDERSTAND THIS PLACES REAL TRADES WITH REAL MONEY`, hardcoded — NOT
+configurable, so an operator can't accidentally weaken it to something
+trivially satisfied) must be typed exactly. Only after all five does
+`LiveExecutionUnlock.acquire()` succeed, followed by a 3-second countdown
+(a last chance to Ctrl-C), THEN startup balance reconciliation (a
+mismatch refuses to proceed), THEN the tick loop.
+
+Verified live against the real network with a freshly-generated,
+zero-balance test wallet — never committed, discarded after the test:
+confirmed each gate fails cleanly and in order when incomplete (mode
+check, then env, then RPC URL, then wallet, then a wrong confirmation
+phrase), and confirmed the FULL chain unlocks correctly and reaches a
+real `getSolBalanceLamports` RPC call (0 balance, trivial reconciliation
+pass on an empty store) and starts the tick loop — with a configured
+limit price below real market, so no entry could fire even with the loop
+running. **Nothing here has been run with a funded wallet or `mode:
+live` against the real soak config — it remains unlocked-but-unused,
+exactly the state the operator asked for.**

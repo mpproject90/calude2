@@ -18,7 +18,14 @@ price — is resolved by deriving an implied liquidity bound from Jupiter's
 own measured `priceImpactPct` (operator's chosen fix, of three options
 put to them). **Verified end-to-end against the live endpoint: a real
 entry filled** — the first one this delivery has ever produced against a
-live feed. 372 tests passing, typecheck clean.
+live feed. **Phase 3's execution layer (spec step 10, DECISIONS §42) is
+now built too — WRITTEN, NOT ENABLED**, per an updated CLAUDE.md hard
+rule: building may happen in parallel with the phase 2 soak, unlocking
+requires the soak's review and explicit operator approval, enforced
+structurally (`LIVE_TRADING=true` + a typed confirmation phrase + config
+`mode: live`, all three, checked in the code, not by convention). See
+"Phase 3 execution layer — built, not unlocked" below. 420 tests passing,
+typecheck clean.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -295,6 +302,54 @@ the soak test above started: the CLI reached a real pinned JUP pool, got
 zero trades in the lookback window, logged a `FEED ERROR` event through
 the fail-closed path, kept polling without crashing.
 
+## Phase 3 execution layer — built, not unlocked (spec step 10, DECISIONS §42)
+
+**CLAUDE.md's hard rule was updated at operator direction**: phase 3 code
+may be written in parallel with the phase 2 soak (so a clean review isn't
+a standing start), but nothing may be ENABLED until the soak is reviewed
+and the operator explicitly approves. Enforced structurally, verified by
+actually running the CLI against incomplete environments, not just
+asserted in unit tests:
+
+1. `config.global.mode` must be `"live"` (checked explicitly in
+   `cli/live.ts` — `assertLiveTradingAllowed` alone is a no-op for
+   non-live modes, a real gap caught while testing this).
+2. `LIVE_TRADING=true` in the environment (exact string).
+3. `SOLANA_RPC_URL` and `WALLET_PRIVATE_KEY` must both be set (`.env`
+   only, never config, never logged).
+4. An interactive confirmation phrase, hardcoded (not configurable, so it
+   can't be weakened), must be typed exactly.
+
+Only once ALL FOUR pass does `executeSwap` become reachable at all — its
+`LiveExecutionUnlock` parameter can only be constructed by passing every
+gate together (`gate.ts`), so a code path that skipped one does not
+compile, not just "isn't supposed to happen."
+
+**Built**: `src/execution/` — `wallet.ts`, `rpcClient.ts` (injectable,
+same pattern as `FetchFn` elsewhere), `gate.ts`, `jupiterSwap.ts` (fresh
+quote at execution time, hard slippage-cap abort, Jupiter's own dynamic
+priority-fee estimator capped at a configured max), `confirmation.ts`
+(three outcomes — confirmed/success, confirmed/failure, and UNKNOWN,
+which halts everything and alerts rather than ever being treated as
+failure or retried), `balanceReconciliation.ts`, `killSwitch.ts`. All
+independently tested against fakes — none of the test suite touches a
+real network or a real wallet. `src/execution/liveRunner.ts` reuses
+paper's exact rule-evaluation functions and `PaperStore` unchanged
+(pointed at `data/live.db`, never `data/paper.db`); a real ledger-safety
+bug (updating position size before a swap was confirmed, copied too
+directly from paper's simulated-fill model) was found and fixed before
+shipping — see DECISIONS §42 for the full account. `src/cli/live.ts`
+(`npm run live`) wires it together with startup + periodic balance
+reconciliation and a 3-second final countdown after unlock.
+
+**Verified, not assumed**: every gate tested by actually running `npm run
+live` against deliberately incomplete environments (wrong mode, missing
+env vars, wrong confirmation phrase) and confirming each fails cleanly in
+order; the full chain also verified to unlock correctly and reach a real
+RPC call against a freshly-generated, zero-balance, never-committed test
+wallet, with a limit price set below market so no entry could fire.
+**Never run with a funded wallet or against the real soak config.**
+
 ### Commands the operator runs (locally)
 
 ```bash
@@ -408,6 +463,7 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates, ladder cost preview (§40) |
 | Rules | `src/rules/` | phase 1 (preserved, not live): entry conditions, intrabar exits, portfolio limits. Phase 2 (live path, §39): limit entry, ladder exit |
 | Paper | `src/paper/` | Jupiter quote-based price feed (§41 follow-up; pool-candle predecessor removed), fill simulator, SQLite-backed persistence, `tick()` runner — spec step 8 |
+| Execution | `src/execution/` | Phase 3 (§42) — WRITTEN, NOT ENABLED. Wallet, RPC client, gate (LiveExecutionUnlock), Jupiter swap execution + slippage cap, confirmation state machine, balance reconciliation, kill switch, live tick runner — spec step 10 |
 | Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
 | CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study + declustering — §33–§35), `data:cex-backtest` (baseline backtest on the CEX-pooled series — §36), `backtest`, `paper` (§41 — polls `positions[]`, simulates fills, persists state) |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
@@ -976,13 +1032,17 @@ zero (see above):
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 372
-cases across 11 files: `data` 91, `rules` 58, `backtest` 57, `paper` 48,
-`filters` 38, `config` 27, `indicators` 23, `repo-hygiene` 10, `amount` 8,
-`logger` 8, `db` 4. Paper trading (§41, plus the Jupiter-quote-feed,
-feed-stats, and implied-liquidity follow-ups) is the `paper` file (price
-feed, simulator, store, runner integration); phase 2's pivot (§39/§40)
-grew `rules` (limit entry + ladder exit), `filters` (ladder cost
-preview), and `config` (tranche/ladder/manual-position schema, `decimals`
-follow-up); `backtest` grew earlier with the CEX study's
+Counts are **test cases**, as reported by vitest — never assertions. 420
+cases across 14 files: `data` 91, `rules` 58, `backtest` 57, `paper` 48,
+`filters` 38, `config` 30, `indicators` 23, `execution2` 21, `execution`
+15, `repo-hygiene` 10, `liveRunner` 9, `amount` 8, `logger` 8, `db` 4.
+Phase 3 (§42) added `execution`/`execution2` (wallet, gate, swap
+execution, confirmation, balance reconciliation) and `liveRunner` (the
+live tick loop, integration-level, including a genuine end-to-end
+unknown-confirmation halt test using a real signable transaction). Paper
+trading (§41, plus the Jupiter-quote-feed, feed-stats, and
+implied-liquidity follow-ups) is the `paper` file; phase 2's pivot
+(§39/§40) grew `rules` (limit entry + ladder exit), `filters` (ladder
+cost preview), and `config` (tranche/ladder/manual-position schema,
+`decimals` follow-up); `backtest` grew earlier with the CEX study's
 decluster/exit-replay diagnostics (§35, §38).

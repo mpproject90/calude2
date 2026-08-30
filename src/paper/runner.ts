@@ -83,7 +83,7 @@ function formatFeedStats(stats: FeedStats): string {
  * `remainingSizeSol / entryPrice` is the exact remaining token quantity
  * regardless of what the CURRENT price is.
  */
-function remainingTokenRaw(open: PersistedPaperPosition, decimals: number): bigint {
+export function remainingTokenRaw(open: PersistedPaperPosition, decimals: number): bigint {
   const tokenQty = open.remainingSizeSol.toNumberUnsafe() / open.entryPrice;
   if (!Number.isFinite(tokenQty) || tokenQty <= 0) {
     throw new Error(
@@ -127,7 +127,7 @@ const UNCONSTRAINED_LIQUIDITY_SENTINEL_SOL = 1_000_000;
  * call site below, where `EntryFillInput.realPriceImpactPct` has its own
  * pre-existing percent convention to match `slippagePct`.)
  */
-function impliedPoolLiquiditySol(tradeSizeSol: number, priceImpactFraction: number | undefined): number | null {
+export function impliedPoolLiquiditySol(tradeSizeSol: number, priceImpactFraction: number | undefined): number | null {
   if (priceImpactFraction === undefined) return null;
   if (!Number.isFinite(priceImpactFraction) || priceImpactFraction <= 1e-9) {
     return UNCONSTRAINED_LIQUIDITY_SENTINEL_SOL;
@@ -135,7 +135,7 @@ function impliedPoolLiquiditySol(tradeSizeSol: number, priceImpactFraction: numb
   return tradeSizeSol / priceImpactFraction;
 }
 
-function buildQuoteRequest(position: ManualPositionConfig, open: PersistedPaperPosition | null): QuoteRequest {
+export function buildQuoteRequest(position: ManualPositionConfig, open: PersistedPaperPosition | null): QuoteRequest {
   if (open === null) {
     return {
       direction: 'buy', tokenMint: position.address, tokenDecimals: position.decimals,
