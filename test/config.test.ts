@@ -46,7 +46,7 @@ describe('config validation', () => {
     const cfg = parseConfig({
       global: {}, tokens: [],
       positions: [{
-        address: JUP, symbol: 'JUP', buyAmountSol: '0.5', limitPrice: 0.8,
+        address: JUP, symbol: 'JUP', decimals: 6, buyAmountSol: '0.5', limitPrice: 0.8,
         ladder: { tranches: [{ targetGainPct: 15, sellPct: 100 }] },
       }],
     });
@@ -152,7 +152,7 @@ describe('live trading gate', () => {
 
 describe('manual positions — price-triggered entry/exit (DECISIONS §39)', () => {
   const position = (over: Record<string, unknown> = {}) => ({
-    address: JUP, symbol: 'JUP', buyAmountSol: '0.5', limitPrice: 0.8,
+    address: JUP, symbol: 'JUP', decimals: 6, buyAmountSol: '0.5', limitPrice: 0.8,
     ladder: { tranches: [{ targetGainPct: 15, sellPct: 50 }, { targetGainPct: 30, sellPct: 50 }] },
     ...over,
   });
@@ -206,5 +206,15 @@ describe('manual positions — price-triggered entry/exit (DECISIONS §39)', () 
   it('has no tier field — token selection is manual, the automated-scanner gate does not apply', () => {
     const cfg = parseConfig({ global: {}, tokens: [], positions: [position()] });
     expect('tier' in cfg.positions[0]!).toBe(false);
+  });
+
+  it('requires decimals (DECISIONS §41 follow-up — Jupiter sell-side quotes need the mint\'s real decimals)', () => {
+    const { decimals: _decimals, ...noDecimals } = position();
+    expect(() => parseConfig({ global: {}, tokens: [], positions: [noDecimals] })).toThrow(ConfigError);
+  });
+
+  it('has no pinnedPoolAddress field — removed with the pool-candle price feed (DECISIONS §41 follow-up)', () => {
+    const cfg = parseConfig({ global: {}, tokens: [], positions: [position()] });
+    expect('pinnedPoolAddress' in cfg.positions[0]!).toBe(false);
   });
 });

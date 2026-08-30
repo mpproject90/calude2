@@ -7,6 +7,18 @@
  * it is because the execution layer they call into differs, never because
  * the position logic does.
  *
+ * PRICE SOURCE (DECISIONS §41 follow-up): Jupiter's quote API, not the old
+ * pool-candle feed — a quote is direction- and size-aware, so the request
+ * itself differs depending on what's being evaluated. With no open
+ * position, "the actual trade size" is the configured buy amount (a `buy`
+ * quote, SOL -> token). With one open, it's whatever of the position
+ * remains — this system tracks position size as a SOL VALUE, not a token
+ * quantity (`evaluateLadderExit`'s model), so the remaining TOKEN quantity
+ * for a `sell` quote is derived each tick from `remainingSizeSol /
+ * entryPrice` (exact, since entryPrice is the same reference the position
+ * was sized against throughout its life — not re-derived from a moving
+ * current price).
+ *
  * FAIL CLOSED, explicitly, at two points:
  *   - A stale or failed price observation blocks BOTH entry and exit
  *     evaluation for that tick — no action on unknown-age data, the same
@@ -30,9 +42,9 @@ import { openLadderPosition, evaluateLadderExit, type LadderPriceWindow } from '
 import { evaluatePositionSize } from '../filters/positionSize.js';
 import { evaluateCostFloor } from '../filters/costFloor.js';
 import { simulateEntryFill, tranchePnl } from './simulator.js';
-import { isStale, type PriceFeed } from './priceFeed.js';
+import { isStale, type PriceFeed, type PriceObservation, type QuoteRequest } from './priceFeed.js';
 import { PaperStore, type PersistedPaperPosition, type FeedStats } from './store.js';
-import { sol } from '../util/amount.js';
+import { sol, TokenAmount } from '../util/amount.js';
 
 export interface TickDeps {
   readonly feed: PriceFeed;
@@ -52,8 +64,8 @@ function formatDuration(ms: number): string {
 
 /**
  * Cumulative feed-reliability summary, appended to every tick's log line
- * (DECISIONS §41) — a pool-quality finding for the operator to weigh, not a
- * code diagnostic. "Longest blind" is the real number the −15% hard stop
+ * (DECISIONS §41) — a source-quality finding for the operator to weigh, not
+ * a code diagnostic. "Longest blind" is the real number the −15% hard stop
  * could have been unable to see the price for, over the whole run,
  * including any downtime between a crash and a Task Scheduler restart.
  */
@@ -62,15 +74,37 @@ function formatFeedStats(stats: FeedStats): string {
   return `feed: ${stats.usableCount} ok / ${blind} blind (${stats.errorCount} err, ${stats.staleCount} stale) | longest blind ${formatDuration(stats.longestBlindStreakMs)}`;
 }
 
-function poolAddressFor(position: ManualPositionConfig): string {
-  if (position.pinnedPoolAddress === undefined) {
+/**
+ * The remaining position's SOL value converted to a raw token quantity for
+ * a sell-side quote. Exact, not an estimate: `originalSizeSol / entryPrice`
+ * is definitionally the real token quantity the entry fill bought, and
+ * `remainingSizeSol` is always a fixed proportion of `originalSizeSol` (the
+ * ladder only ever removes fixed percentages of the ORIGINAL size), so
+ * `remainingSizeSol / entryPrice` is the exact remaining token quantity
+ * regardless of what the CURRENT price is.
+ */
+function remainingTokenRaw(open: PersistedPaperPosition, decimals: number): bigint {
+  const tokenQty = open.remainingSizeSol.toNumberUnsafe() / open.entryPrice;
+  if (!Number.isFinite(tokenQty) || tokenQty <= 0) {
     throw new Error(
-      `${position.symbol}: paper trading requires pinnedPoolAddress — dynamic pool discovery is ` +
-      'not part of this delivery, and re-discovering on every poll would reintroduce the exact ' +
-      'pool-selection instability DECISIONS §29 fixed by pinning. Set positions[].pinnedPoolAddress.',
+      `${open.symbol}: cannot derive a positive remaining token quantity ` +
+      `(remainingSizeSol=${open.remainingSizeSol.toString()}, entryPrice=${open.entryPrice})`,
     );
   }
-  return position.pinnedPoolAddress;
+  return TokenAmount.fromDecimalString(tokenQty.toFixed(decimals), decimals).raw;
+}
+
+function buildQuoteRequest(position: ManualPositionConfig, open: PersistedPaperPosition | null): QuoteRequest {
+  if (open === null) {
+    return {
+      direction: 'buy', tokenMint: position.address, tokenDecimals: position.decimals,
+      amountRaw: sol(position.buyAmountSol).raw,
+    };
+  }
+  return {
+    direction: 'sell', tokenMint: position.address, tokenDecimals: position.decimals,
+    amountRaw: remainingTokenRaw(open, position.decimals),
+  };
 }
 
 /**
@@ -82,15 +116,15 @@ function poolAddressFor(position: ManualPositionConfig): string {
 const DOWNTIME_GAP_MULTIPLIER = 1.5;
 
 async function observePrice(
-  position: ManualPositionConfig, poolAddress: string, deps: TickDeps,
-): Promise<{ price: number; timestamp: number } | null> {
+  position: ManualPositionConfig, quoteRequest: QuoteRequest, deps: TickDeps,
+): Promise<PriceObservation | null> {
   const nowMs = deps.now();
   const normalPollGapMs = deps.global.stopPollSeconds * 1000 * DOWNTIME_GAP_MULTIPLIER;
   const tally = (outcome: 'usable' | 'stale' | 'error'): FeedStats =>
     deps.store.recordFeedTick({ symbol: position.symbol, outcome, nowMs, normalPollGapMs });
 
   try {
-    const obs = await deps.feed.getPrice(poolAddress);
+    const obs = await deps.feed.getPrice(quoteRequest);
     if (isStale(obs, nowMs, deps.staleAfterMs)) {
       const stats = tally('stale');
       const detail = `last observation ${((nowMs - obs.timestamp) / 60_000).toFixed(1)} minutes old ` +
@@ -100,7 +134,11 @@ async function observePrice(
       return null;
     }
     const stats = tally('usable');
-    deps.log(`[${position.symbol}] price ${obs.price} — ${formatFeedStats(stats)}`);
+    deps.log(
+      `[${position.symbol}] price ${obs.price} (${quoteRequest.direction}` +
+      `${obs.priceImpactPct !== undefined ? `, ${(obs.priceImpactPct * 100).toFixed(4)}% impact` : ''}) ` +
+      `— ${formatFeedStats(stats)}`,
+    );
     return obs;
   } catch (err) {
     const stats = tally('error');
@@ -112,8 +150,9 @@ async function observePrice(
 }
 
 async function tryEnter(
-  position: ManualPositionConfig, poolAddress: string, price: number, timestamp: number, deps: TickDeps,
+  position: ManualPositionConfig, observation: PriceObservation, deps: TickDeps,
 ): Promise<void> {
+  const { price, timestamp } = observation;
   const entryDecision = evaluateLimitEntry(price, position.limitPrice);
   if (!entryDecision.fill) return;
 
@@ -158,6 +197,7 @@ async function tryEnter(
     midPrice: price, buyAmountSol: sizing.sizeSol, dexFeePct: deps.global.costFloor.dexFeePct,
     priorityFeeSol: Number(deps.global.costFloor.priorityFeeSol), jitoTipSol: Number(deps.global.costFloor.jitoTipSol),
     fallbackSlippagePct: deps.global.costFloor.fallbackSlippagePct, poolLiquiditySol: deps.poolLiquiditySol,
+    ...(observation.priceImpactPct !== undefined ? { realPriceImpactPct: observation.priceImpactPct } : {}),
   });
 
   // Reuse openLadderPosition for the initial state (stop price etc.) rather than
@@ -165,7 +205,8 @@ async function tryEnter(
   const initialState = openLadderPosition(fill.fillPrice, timestamp, fill.netSizeSol, position.ladder);
   const id = randomUUID();
   deps.store.openPosition({
-    id, symbol: position.symbol, address: position.address, poolAddress,
+    id, symbol: position.symbol, address: position.address,
+    poolAddress: '',   // no single pool with a mint-pair quote feed — see store.ts's "not pool-based" convention
     entryPrice: fill.fillPrice, entryTimestamp: timestamp, originalSizeSol: fill.netSizeSol,
     peakPrice: initialState.peakPrice, stopLossPrice: initialState.stopLossPrice,
     ladderConfig: position.ladder,
@@ -177,15 +218,16 @@ async function tryEnter(
     filledAt: timestamp,
   });
   deps.log(
-    `[${position.symbol}] ENTRY FILLED at ${fill.fillPrice.toFixed(6)} (mid was ${price.toFixed(6)}, ` +
-    `${fill.slippagePct.toFixed(2)}% slippage${fill.slippageEstimated ? ', estimated' : ''}), ` +
+    `[${position.symbol}] ENTRY FILLED at ${fill.fillPrice.toFixed(8)} (observed ${price.toFixed(8)}, ` +
+    `${fill.slippagePct.toFixed(4)}% ${fill.slippageEstimated ? 'slippage, estimated' : 'impact'}), ` +
     `size ${fill.netSizeSol.toString()} SOL`,
   );
 }
 
 async function tryExit(
-  open: PersistedPaperPosition, price: number, timestamp: number, deps: TickDeps,
+  open: PersistedPaperPosition, observation: PriceObservation, deps: TickDeps,
 ): Promise<void> {
+  const { price, timestamp } = observation;
   const state = {
     entryPrice: open.entryPrice, entryTimestamp: open.entryTimestamp,
     originalSizeSol: open.originalSizeSol, remainingSizeSol: open.remainingSizeSol,
@@ -223,22 +265,22 @@ async function tryExit(
   if (!stillOpen) deps.store.closePosition(open.id, timestamp);
 
   deps.log(
-    `[${open.symbol}] ${trigger.reason.toUpperCase()} FILLED at ${trigger.fillPrice.toFixed(6)} ` +
-    `(trigger ${price.toFixed(6)}), size ${trigger.sizeSol.toString()} SOL, net P&L ${pnl.netPnlSol.toString()} SOL` +
+    `[${open.symbol}] ${trigger.reason.toUpperCase()} FILLED at ${trigger.fillPrice.toFixed(8)} ` +
+    `(trigger ${price.toFixed(8)}), size ${trigger.sizeSol.toString()} SOL, net P&L ${pnl.netPnlSol.toString()} SOL` +
     `${stillOpen ? ` — ${nextState.remainingSizeSol.toString()} SOL remaining` : ' — position CLOSED'}`,
   );
 }
 
 /** One poll for one configured position: observe price, then act (or refuse to act) on it. */
 export async function tick(position: ManualPositionConfig, deps: TickDeps): Promise<void> {
-  const poolAddress = poolAddressFor(position);
-  const observation = await observePrice(position, poolAddress, deps);
+  const open = deps.store.getOpenPosition(position.symbol);
+  const quoteRequest = buildQuoteRequest(position, open);
+  const observation = await observePrice(position, quoteRequest, deps);
   if (observation === null) return;   // fail closed — stale or failed feed, no action this tick
 
-  const open = deps.store.getOpenPosition(position.symbol);
   if (open === null) {
-    await tryEnter(position, poolAddress, observation.price, observation.timestamp, deps);
+    await tryEnter(position, observation, deps);
   } else {
-    await tryExit(open, observation.price, observation.timestamp, deps);
+    await tryExit(open, observation, deps);
   }
 }

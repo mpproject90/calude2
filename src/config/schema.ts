@@ -157,13 +157,20 @@ export const ladderExitSchema = z
  * `tier` — that gate existed to filter which tokens an automated scanner
  * would consider, and does not apply when the operator has already picked
  * the token by hand.
+ *
+ * No `pinnedPoolAddress` (removed, DECISIONS §41 follow-up) — that field
+ * existed only for the old pool-candle-based live price feed, which was
+ * replaced by Jupiter quote-based pricing (mint-pair, no pool needed).
+ * `decimals` is new and IS required by the new feed: a sell-side quote
+ * needs the token's raw on-chain amount, which needs decimals to compute
+ * from the SOL-value position size this system tracks internally.
  */
 export const manualPositionSchema = z.object({
   address: solanaAddress,
   symbol: z.string().min(1).max(20),
+  decimals: z.number().int().min(0).max(18),
   buyAmountSol: decimalString,
   limitPrice: z.number().positive(),
-  pinnedPoolAddress: solanaAddress.optional(),
   ladder: ladderExitSchema,
   limits: limitsSchema.default({}),
 });

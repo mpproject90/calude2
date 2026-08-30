@@ -8,9 +8,38 @@ next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 **Last updated:** Phase 1 is CONCLUDED — see the prominent section
 immediately below. Phase 2's pivot (manual entry, automated exit) is
 built and confirmed (§39/§40). **Paper trading (spec step 8, DECISIONS
-§41) is built and now RUNNING** — a one-week soak test on JUP started
-2026-08-30, see "Paper trading soak test — in progress" further down.
-352 tests passing, typecheck clean.
+§41) is built. The price feed was switched from pool candles to Jupiter's
+quote API the same day (§41 follow-up) after the first soak hour showed
+13/13 ticks were feed errors — fixed and verified end-to-end. The soak
+clock has NOT restarted yet — a second, more severe blocker (no entry can
+ever fill, see "STOP" below) needs an operator decision first.** 369
+tests passing, typecheck clean.
+
+## STOP — soak restart is blocked on a position-sizing decision, not started yet
+
+The Jupiter price-feed switch works and is fully tested, but the same
+smoke test that proved it also exposed a pre-existing gate that makes the
+soak useless as currently wired: `cli/paper.ts` hardcodes
+`poolLiquiditySol: null` (no live liquidity feed was ever built), and
+`evaluatePositionSize` fails closed UNCONDITIONALLY whenever liquidity is
+unknown (§6.4, by design). **No entry can ever fill, for any price, no
+matter how long the soak runs.** This was invisible under the old candle
+feed because it almost never returned a usable price in the first place
+(13/13 feed errors), so `tryEnter` was never reached. Full trace in
+DECISIONS §41's second follow-up. Options, not decided here:
+1. Pass a manual `--pool-liquidity-sol` figure to `npm run paper` (mirrors
+   the existing backtest CLI flag) — simple, but a static snapshot the
+   operator has to look up and refresh by hand.
+2. Build a live liquidity lookup (e.g. GeckoTerminal pool search, polled
+   occasionally) — dynamic, but real new scope, and reintroduces a
+   pool-address dependency the Jupiter switch just removed.
+3. Derive an implied liquidity bound directly from the Jupiter quote's
+   own `priceImpactPct` (impact ≈ size/liquidity under this project's
+   existing linear-impact assumption, already used in `costFloor.ts` —
+   inverting it uses real data instead of a new model, no new API call).
+
+**Awaiting operator direction on which of these (or something else) to
+use before the soak restarts.**
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
@@ -120,31 +149,42 @@ see "Paper trading built, not yet run" below): paper trading (spec step
 8) and the live execution layer (spec step 10, gated on explicit operator
 approval after paper trading runs and is reviewed).
 
-## Paper trading soak test — in progress (spec step 8, DECISIONS §41)
+## Paper trading soak test — price feed fixed, NOT YET RESTARTED (spec step 8, DECISIONS §41)
 
-**Started 2026-08-30.** JUP, pinned meteora JUP/SOL pool, limit
-0.0021068 (~3% above the 0.0020454 spot observed at start), 0.1 SOL,
-ladder 40%@+10% / 30%@+20% / 30% held with trailing (10%) armed after
-tranche 1, hard stop −15%, time exit 72h. Cost preview passed both
-checks on every tranche with comfortable margin — full numbers and the
-size sweep that picked 0.1 SOL are in DECISIONS §41. Config is the live
-`config/default.yaml` (`global.mode: paper`).
+**Config (unchanged in shape, price source changed underneath it)**: JUP,
+limit 0.00210245 (~3% above the 0.0020412 spot observed via a live
+Jupiter quote — no longer a candle), 0.1 SOL, ladder 40%@+10% / 30%@+20%
+/ 30% held with trailing (10%) armed after tranche 1, hard stop −15%,
+time exit 72h. Cost preview passed both checks on every tranche with
+comfortable margin — full numbers and the size sweep that picked 0.1 SOL
+are in DECISIONS §41. Config is the live `config/default.yaml`
+(`global.mode: paper`). `pinnedPoolAddress` is GONE from `positions[]` —
+a quote is a mint pair, no pool needed; `decimals: 6` is new and
+required.
 
-**Known going in, not bugs**: this pool's 1-minute bars are sparse (12 of
-180 possible bars had a trade in a 3h sample, median gap 9 min, max 55
-min) — expect frequent `feed_error` events on individual polls, by
-design (fail-closed). **This is now measured continuously, not
-estimated**: schema v4 added `paper_feed_stats` (DECISIONS §41
-follow-up), a persistent per-symbol counter of usable vs. blind ticks
-and the longest continuous blind streak — printed on every single log
-line so the running total is always visible, and it folds in downtime
-between a crash and a Task Scheduler restart, not just in-process feed
-errors, since the stop-loss is exactly as blind either way. **If the
-longest blind streak ever approaches or exceeds the −15% stop's realistic
+**The first soak hour found the candle feed doesn't work as a live
+feed — 13 of 13 ticks were `FEED ERROR`, 0 usable, over ~7 minutes.**
+Root cause and fix in DECISIONS §41's follow-up section: switched to
+Jupiter's quote API (`lite-api.jup.ag/swap/v1/quote`, keyless, no key
+needed, 30 req/min budget vs. our ~2 req/min usage). Verified end-to-end
+against the real endpoint — first tick came back `feed: 1 ok / 0 blind`,
+something the candle feed never once produced. Also found and fixed a
+real double-counted-slippage bug this switch exposed (the fill simulator
+was applying a synthetic 1% markup on top of what is now an
+already-real, already-executable Jupiter price) — see DECISIONS §41.
+
+**Then that same smoke test found a second, more severe blocker — see
+the STOP section at the top of this file.** No entry can currently fill
+at all, so the soak has not been restarted yet. Once resolved, the
+"known going in" property to watch is now the quote API's own
+availability/rate-limiting, not pool trade frequency — the feed-stats
+counter (`paper_feed_stats`, schema v4) didn't need to change to keep
+measuring the right thing: usable vs. blind ticks and the longest
+continuous blind streak, printed on every log line, folding in any
+downtime between a crash and a Task Scheduler restart. **If the longest
+blind streak ever approaches or exceeds the −15% stop's realistic
 overshoot tolerance, that is the finding this soak test exists to
-surface** — read as a property of this pool/feed, not a code defect; the
-resolution, if needed, is a different price source or a different token,
-decided by the operator at review.
+surface.**
 
 **Decide before live, not now**: no cooldown between a position closing
 and the next entry is wired into the paper path (`portfolio.ts`'s
@@ -372,7 +412,7 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Indicators | `src/indicators/` | RSI, MFI, ATR; warm-up gating; `{value, reliable, reason}` |
 | Filters | `src/filters/` | relative strength (exact ratio-return, DECISIONS §20), cost floor, position sizing, regime, tier gates, ladder cost preview (§40) |
 | Rules | `src/rules/` | phase 1 (preserved, not live): entry conditions, intrabar exits, portfolio limits. Phase 2 (live path, §39): limit entry, ladder exit |
-| Paper | `src/paper/` | price feed (§41), fill simulator, SQLite-backed persistence, `tick()` runner — spec step 8 |
+| Paper | `src/paper/` | Jupiter quote-based price feed (§41 follow-up; pool-candle predecessor removed), fill simulator, SQLite-backed persistence, `tick()` runner — spec step 8 |
 | Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
 | CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study + declustering — §33–§35), `data:cex-backtest` (baseline backtest on the CEX-pooled series — §36), `backtest`, `paper` (§41 — polls `positions[]`, simulates fills, persists state) |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
@@ -941,11 +981,13 @@ zero (see above):
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 352
-cases across 11 files: `data` 91, `rules` 58, `backtest` 57, `paper` 30,
-`filters` 38, `config` 25, `indicators` 23, `repo-hygiene` 10, `amount` 8,
-`logger` 8, `db` 4. Paper trading (§41) added the new `paper` file (price
-feed, simulator, store, runner integration); phase 2's pivot (§39/§40) grew
-`rules` (limit entry + ladder exit), `filters` (ladder cost preview), and
-`config` (tranche/ladder/manual-position schema); `backtest` grew earlier
-with the CEX study's decluster/exit-replay diagnostics (§35, §38).
+Counts are **test cases**, as reported by vitest — never assertions. 369
+cases across 11 files: `data` 91, `rules` 58, `backtest` 57, `paper` 45,
+`filters` 38, `config` 27, `indicators` 23, `repo-hygiene` 10, `amount` 8,
+`logger` 8, `db` 4. Paper trading (§41, plus the Jupiter-quote-feed and
+feed-stats follow-ups) is the `paper` file (price feed, simulator, store,
+runner integration); phase 2's pivot (§39/§40) grew `rules` (limit entry +
+ladder exit), `filters` (ladder cost preview), and `config`
+(tranche/ladder/manual-position schema, `decimals` follow-up); `backtest`
+grew earlier with the CEX study's decluster/exit-replay diagnostics
+(§35, §38).

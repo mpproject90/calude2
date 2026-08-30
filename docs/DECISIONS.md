@@ -2023,6 +2023,126 @@ kill — `paper/store.ts`'s `getOpenPosition` read path is what makes this
 free (§41), but this soak test is the first time it is exercised against
 a real, not synthetic, in-flight position.
 
+## Price source switched to Jupiter's quote API — the candle feed never worked as a live feed
+
+**The evidence, not a guess**: the first hour of the real soak test (§41
+above) recorded 13 of 13 ticks as `FEED ERROR`, 0 usable — the pinned
+JUP/SOL pool's 1-minute bars are sparse enough (median gap 9 min, max 55
+min, measured earlier) that `GeckoTerminalPriceFeed`'s "latest 1-minute
+candle" model, requiring a trade inside its own 5-minute lookback, mostly
+came back empty. **Operator's diagnosis, confirmed correct**: a candle
+only exists if someone traded that minute; an AMM pool has a price
+continuously, from its reserve ratio. The candle feed was measuring the
+wrong thing for a live poll.
+
+**Researched before building, same discipline as the historical-data
+providers**: Jupiter's quote endpoint, `GET https://lite-api.jup.ag/swap/v1/quote`
+(the keyless free tier — confirmed live with a real request, 200 OK, no
+key). Verified against the actual current Developer Platform docs, not
+assumed from memory (the API was reworked since; older "Ultra Swap"
+rate-limit docs are explicitly marked deprecated on Jupiter's own site):
+**Keyless tier = 0.5 req/s, 30 req/min, 60-second sliding window.** This
+project's poll cadence (30s = 2 req/min) sits at ~7% of that budget for
+one position. A live test quote (0.1 SOL → JUP) derived to ≈0.0020437
+SOL/JUP, matching the ≈0.0020454 candle-derived price from the same
+morning — cross-checked clean before building anything on top of it. The
+route Jupiter picked didn't even touch the pinned pool — it split across
+three different AMMs, which is the point: this is the same router phase 3
+would execute through, not a proxy for it.
+
+**No pool needed at all** — a quote is a mint-pair (`inputMint`,
+`outputMint`, `amount`), not a pool address. `manualPositionSchema`'s
+`pinnedPoolAddress` field is REMOVED (not deprecated-but-kept): once
+`runner.ts` stopped calling `poolAddressFor()`, nothing read it anymore,
+and CLAUDE.md's own instruction is to delete what's genuinely unused
+rather than leave a dead field in the schema. `tokenSchema`'s OWN
+`pinnedPoolAddress` (the historical-candle/backtest path, §29/§30) is a
+different field entirely and is untouched.
+
+**A quote is direction- AND size-aware, which the old feed never was** —
+`PriceFeed.getPrice` now takes a `QuoteRequest` (`direction: 'buy' |
+'sell'`, `tokenMint`, `tokenDecimals`, `amountRaw`) instead of a bare pool
+address. `buy` (no open position): SOL → token, sized to the configured
+`buyAmountSol` — "the actual trade size" the operator asked for. `sell`
+(position open): token → SOL, sized to whatever of the position remains.
+This system tracks position size as a SOL VALUE, not a token quantity
+(§39's model), so the remaining TOKEN quantity for a sell-side quote is
+derived each tick as `remainingSizeSol / entryPrice` — exact, not an
+estimate, because `originalSizeSol / entryPrice` is definitionally the
+real token quantity the entry fill bought, and `remainingSizeSol` is
+always a fixed proportion of `originalSizeSol` (the ladder only ever
+removes fixed percentages of the ORIGINAL size). This is why
+`decimals` is now a REQUIRED field on `manualPositionSchema` — a sell-side
+quote's `amount` must be the token's real raw on-chain units, which needs
+real decimals to compute; the operator supplies it manually alongside the
+address, the same "manual entry" philosophy as everything else in
+`positions[]`. `tick()` now builds the request BEFORE fetching a price
+(it needs `open` from the store first, to know which leg to quote) rather
+than fetching a position-agnostic price and branching after — a
+structural change, not just a swapped implementation.
+
+**A real, quantified inaccuracy found and fixed while wiring this up, not
+left in place**: `simulator.ts`'s `simulateEntryFill` always applied its
+OWN synthetic ask-side slippage markup on top of whatever `midPrice` it
+was given — correct when `midPrice` was a candle close (no slippage of
+its own), but with `poolLiquiditySol` always `null` in this delivery, the
+fallback path applies a FLAT 1% markup UNCONDITIONALLY. Once the observed
+price is itself a Jupiter quote for the exact size (already inclusive of
+real price impact — 0.0001% in the live test above, this pool is deep
+relative to a 0.1 SOL trade), stacking the old 1% synthetic markup on top
+would have made every simulated entry fill ~1% worse than the real
+number, silently, for the whole week. Fixed: `EntryFillInput` gained an
+optional `realPriceImpactPct`; when a feed supplies one, `fillPrice =
+midPrice` directly (the quote already IS the ask) and the reported
+`slippagePct` is the real figure, not a guess — the old synthetic-markup
+path is preserved unchanged as the fallback for a feed that doesn't have
+one to offer, so nothing about the function's behavior for OTHER callers
+changed. This is scoped narrowly: exits were never affected the same way
+— `evaluateLadderExit`'s fill price already comes from the PRE-SET
+trigger level (the stop-loss/target price itself) via `exitSlippagePct`,
+not from the freshly observed market price, so there was no equivalent
+double-count on that side to fix.
+
+**Feed counters kept, now measuring something different, exactly as
+expected**: `paper_feed_stats` (schema v4) is source-agnostic by design —
+it counts `usable`/`stale`/`error` outcomes regardless of what produced
+them. Under the candle feed, `error` meant "no trade in the lookback
+window" (a pool-liquidity/trade-frequency finding). Under the quote feed,
+`error` means a failed or malformed HTTP request or a non-200 response —
+API availability and rate-limiting, not trade frequency. The counter
+itself, and the "longest blind streak" figure the −15% stop cares about,
+did not need to change at all to keep meaning the right thing.
+
+**Real end-to-end smoke test** (not mocked) before restarting the soak:
+`npm run paper` against the live `lite-api.jup.ag` endpoint returned a
+USABLE price on the very first tick — `feed: 1 ok / 0 blind` — a result
+the candle feed never once produced in over an hour of real polling.
+
+## A second, more severe blocker found by that same smoke test — no entry can EVER fill as currently wired
+
+The smoke test above reached `evaluateLimitEntry` for the first time ever
+in this soak (the candle feed's blindness had hidden this path
+completely). Price (0.0020347) was below the limit (0.00210245) — the
+entry SHOULD have fired — but `evaluatePositionSize` rejected it: `pool
+liquidity unknown — cannot bound slippage`. Traced to
+`src/filters/positionSize.ts`: when `poolLiquiditySol === null`, it fails
+closed UNCONDITIONALLY, every time, by design (§6.4, "without liquidity
+data we cannot bound slippage, so we do not trade"). `cli/paper.ts` has
+always hardcoded `poolLiquiditySol: null` (no live liquidity feed was
+ever built — flagged as a known gap in the ORIGINAL §41 delivery and in
+every STATUS.md update since). **This gate was never actually exercised
+by the first week's soak attempt, because the candle feed almost never
+returned a usable price in the first place — 13 of 13 ticks were feed
+errors, so `tryEnter` was never reached to hit it.** Now that the price
+feed reliably returns usable prices, this gate is exposed as an absolute
+block: as wired right now, ZERO entries can ever fill, for any price, no
+matter how long the soak runs. **Not fixed silently — this is a real
+policy decision (how position size gets bounded, i.e. a risk control, not
+a data-source swap) reported to the operator instead, per this project's
+established discipline of reporting rather than deciding matters like
+this alone.** See STATUS.md for the options put to the operator and
+whichever one is chosen.
+
 ## Feed-reliability counters (schema v4), and moving the soak test to a Windows Scheduled Task
 
 Two follow-ups requested once the soak test was already producing real

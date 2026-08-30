@@ -24,6 +24,17 @@ export interface EntryFillInput {
   readonly jitoTipSol: number;
   readonly fallbackSlippagePct: number;
   readonly poolLiquiditySol: number | null;
+  /**
+   * DECISIONS §41 follow-up: when the feed already returned a real,
+   * size-aware price-impact figure (Jupiter's quote API), `midPrice` IS
+   * already the executable ask — re-applying the synthetic linear-slippage
+   * markup below would double-count it. Supplying this skips that markup
+   * entirely and reports the real figure instead of a guess. Omit it (the
+   * historical default) to keep the synthetic estimate, e.g. for a feed
+   * that only returns a historical print with no size-aware impact of its
+   * own.
+   */
+  readonly realPriceImpactPct?: number;
 }
 
 export interface EntryFillResult {
@@ -37,18 +48,37 @@ export interface EntryFillResult {
 }
 
 /**
- * Simulates a market buy against `midPrice`: fills at the ASK
- * (`midPrice * (1 + slippagePct/100)`), never at the raw observed price.
- * `poolLiquiditySol` sizes the slippage the same way `costFloor.ts` does
- * for one leg; null falls back to the configured flat estimate.
+ * Simulates a market buy against `midPrice`. Three cases, most-specific
+ * first: (1) a REAL size-aware price-impact figure is supplied
+ * (`realPriceImpactPct`, DECISIONS §41 follow-up) — `midPrice` is already
+ * the executable ask, so it fills there directly, no synthetic markup; (2)
+ * no real figure and no pool liquidity — fills at `midPrice * (1 +
+ * fallbackSlippagePct/100)`, an estimate; (3) pool liquidity known — fills
+ * at `midPrice * (1 + slippagePct/100)`, sized the same way `costFloor.ts`
+ * does for one leg.
  */
 export function simulateEntryFill(input: EntryFillInput): EntryFillResult {
-  const { midPrice, buyAmountSol, dexFeePct, priorityFeeSol, jitoTipSol, fallbackSlippagePct, poolLiquiditySol } = input;
+  const { midPrice, buyAmountSol, dexFeePct, priorityFeeSol, jitoTipSol, fallbackSlippagePct, poolLiquiditySol, realPriceImpactPct } = input;
   const buyAmountNum = buyAmountSol.toNumberUnsafe();
 
-  const slippageEstimated = poolLiquiditySol === null || poolLiquiditySol <= 0;
-  const slippagePct = slippageEstimated ? fallbackSlippagePct : (buyAmountNum / poolLiquiditySol) * 100;
-  const fillPrice = midPrice * (1 + slippagePct / 100);
+  let slippagePct: number;
+  let slippageEstimated: boolean;
+  let fillPrice: number;
+  if (realPriceImpactPct !== undefined && Number.isFinite(realPriceImpactPct)) {
+    // midPrice is ALREADY the executable ask (a Jupiter quote for this exact
+    // size) — apply no further markup, or the impact would double-count.
+    slippagePct = realPriceImpactPct;
+    slippageEstimated = false;
+    fillPrice = midPrice;
+  } else if (poolLiquiditySol === null || poolLiquiditySol <= 0) {
+    slippagePct = fallbackSlippagePct;
+    slippageEstimated = true;
+    fillPrice = midPrice * (1 + slippagePct / 100);
+  } else {
+    slippagePct = (buyAmountNum / poolLiquiditySol) * 100;
+    slippageEstimated = false;
+    fillPrice = midPrice * (1 + slippagePct / 100);
+  }
 
   const dexFeeSol = TokenAmount.fromDecimalString((buyAmountNum * (dexFeePct / 100)).toFixed(buyAmountSol.decimals), buyAmountSol.decimals);
   const fixedFeeSol = TokenAmount.fromDecimalString((priorityFeeSol + jitoTipSol).toFixed(buyAmountSol.decimals), buyAmountSol.decimals);

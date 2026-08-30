@@ -11,18 +11,16 @@
  *
  *   npm run paper -- --config config/default.yaml --db data/paper.db
  *
- * Every configured `positions[]` entry needs `pinnedPoolAddress` (dynamic
- * discovery isn't part of this delivery — see `runner.ts`'s
- * `poolAddressFor`). State lives in `--db`, the same schema-v3 file
- * `data:fetch` writes candles to; running this against a fresh path is
+ * Price source is Jupiter's quote API (DECISIONS §41 follow-up) — mint-pair
+ * only, no pool address needed. State lives in `--db`, the same schema-v4
+ * file `data:fetch` writes candles to; running this against a fresh path is
  * fine, the schema migration runs either way. Ctrl-C (SIGINT) stops
  * cleanly after the in-flight poll — state is already durable per-tick, so
  * there is nothing to flush on exit.
  */
 import { openDb } from '../db/index.js';
 import { loadConfig, ConfigError } from '../config/load.js';
-import { GeckoTerminalCandleProvider } from '../data/providers/geckoterminal.js';
-import { GeckoTerminalPriceFeed } from '../paper/priceFeed.js';
+import { JupiterQuoteFeed } from '../paper/priceFeed.js';
 import { PaperStore } from '../paper/store.js';
 import { tick, type TickDeps } from '../paper/runner.js';
 import { formatErrorChain } from '../util/errorChain.js';
@@ -38,9 +36,12 @@ const dbPath = arg('db', 'data/paper.db');
 
 /**
  * A price observation older than 5 minutes is refused (DECISIONS §41's
- * fail-closed rule) — five polls at the default 30s `stopPollSeconds`
- * before staleness bites, wide enough that a single slow request doesn't
- * itself trip the guard, tight enough that a genuinely stuck feed does.
+ * fail-closed rule). For the Jupiter quote feed this guard rarely fires in
+ * practice — a quote's timestamp is the moment the request returned, not
+ * an underlying trade time, so staleness only bites if an observation is
+ * somehow held and acted on long after being fetched. Kept as a generic
+ * safety net rather than removed; `error` (a failed/malformed request) is
+ * the outcome expected to dominate blind ticks now, not `stale`.
  */
 const STALE_AFTER_MS = 5 * 60_000;
 
@@ -60,19 +61,10 @@ async function main(): Promise<void> {
   if (cfg.positions.length === 0) {
     throw new Error(`${configPath} has no positions[] configured — paper trading has nothing to do`);
   }
-  for (const p of cfg.positions) {
-    if (p.pinnedPoolAddress === undefined) {
-      throw new Error(
-        `${p.symbol}: positions[].pinnedPoolAddress is required for paper trading (dynamic discovery ` +
-        'is not part of this delivery — see DECISIONS §41).',
-      );
-    }
-  }
 
   const db = openDb(dbPath);
   const store = new PaperStore(db);
-  const provider = new GeckoTerminalCandleProvider();
-  const feed = new GeckoTerminalPriceFeed(provider);
+  const feed = new JupiterQuoteFeed();
 
   const deps: TickDeps = {
     feed, store, global: cfg.global, now: () => Date.now(),

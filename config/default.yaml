@@ -102,6 +102,7 @@ tokens:
 # positions:
 #   - address: "<mint>"
 #     symbol: SYM
+#     decimals: 6                # the mint's on-chain decimals — Jupiter quotes need it
 #     buyAmountSol: "0.5"
 #     limitPrice: 0.80          # buys when observed price is at or below this
 #     ladder:
@@ -121,21 +122,23 @@ tokens:
 #       maxFixedCostPctOfProceeds: 20   # DECISIONS §40 — reject a tranche too small for its own fixed fee
 #
 # ACTIVE: the paper-trading soak test (DECISIONS §41, one-week minimum).
-# JUP on the same pinned meteora JUP/SOL pool tokens[] above already uses —
-# most validated pool in this project (§24-§31). limitPrice is set ~3%
-# above spot (0.0020454 SOL/JUP observed 2026-08-30) deliberately, so entry
-# fires promptly — this soak tests the EXECUTION machinery, not entry
-# quality (CLAUDE.md: report numbers, never claim profitability). 0.1 SOL
-# buy size: small (mechanism test only), and clears both the 5% net floor
-# and 20% fixed-cost ratio checks on every tranche with comfortable margin
-# — see the config:check output recorded in DECISIONS §41 before this run
+# Price source is Jupiter's quote API, not a pool (§41 follow-up) — no
+# pinnedPoolAddress needed here anymore, but `decimals` (JUP = 6) now IS
+# required: a sell-side quote needs the token's real on-chain decimals.
+# limitPrice is set ~3% above spot (0.0020412 SOL/JUP observed 2026-08-30,
+# via a live Jupiter quote, not a candle) deliberately, so entry fires
+# promptly — this soak tests the EXECUTION machinery, not entry quality
+# (CLAUDE.md: report numbers, never claim profitability). 0.1 SOL buy
+# size: small (mechanism test only), and clears both the 5% net floor and
+# 20% fixed-cost ratio checks on every tranche with comfortable margin —
+# see the config:check output recorded in DECISIONS §41 before this run
 # started.
 positions:
   - address: "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN"
     symbol: JUP
+    decimals: 6
     buyAmountSol: "0.1"
-    limitPrice: 0.0021068
-    pinnedPoolAddress: "C8Gr6AUuq9hEdSYJzoEpNcdjpojPZwqG5MtQbeouNNwg"
+    limitPrice: 0.00210245
     ladder:
       tranches:
         - targetGainPct: 10     # sell 40% at +10%

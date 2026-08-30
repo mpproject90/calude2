@@ -416,7 +416,7 @@ function ladderCfg(over: Record<string, unknown> = {}): LadderExitConfig {
   return parseConfig({
     global: {}, tokens: [],
     positions: [{
-      address: JUP, symbol: 'JUP', buyAmountSol: '1', limitPrice: 100,
+      address: JUP, symbol: 'JUP', decimals: 6, buyAmountSol: '1', limitPrice: 100,
       ladder: {
         tranches: [{ targetGainPct: 15, sellPct: 40 }, { targetGainPct: 30, sellPct: 40 }],
         ...over,
