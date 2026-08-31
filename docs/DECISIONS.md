@@ -2540,3 +2540,71 @@ limit price below real market, so no entry could fire even with the loop
 running. **Nothing here has been run with a funded wallet or `mode:
 live` against the real soak config — it remains unlocked-but-unused,
 exactly the state the operator asked for.**
+
+## 43. Read-only status page over the paper DB — `npm run status:page`
+
+A static-HTML report generator (`src/cli/statusPage.ts`), regenerated on
+every run, no server, no live updates, no controls of any kind — a
+picture of the soak at the moment it was generated, not a running
+process. Operator's explicit constraint: must not write to
+`data/paper.db`, must not touch the soak, must not be able to trigger
+any action.
+
+**Read-only enforced structurally, not by convention, and verified, not
+assumed**: opens `--db` with better-sqlite3's `{readonly: true,
+fileMustExist: true, timeout: 0}` — every query in this file is a bare
+`SELECT`. `timeout: 0` means a busy database fails the open immediately
+rather than retrying/waiting, matching "open read-only rather than
+waiting or forcing" exactly. This file never calls `openDb` (which runs
+`CREATE TABLE IF NOT EXISTS` — a DDL statement that needs write access
+even though it's a no-op against an existing schema, and would throw
+against a readonly connection) and never imports any of `PaperStore`'s
+write methods. The property itself is unit-tested against a real
+throwaway SQLite file, not just documented: a readonly connection can
+`SELECT` from a real schema-initialized db, and an `INSERT` against that
+same readonly connection throws — the exact guarantee this whole tool
+depends on, confirmed rather than trusted from library docs alone.
+Smoke-tested against the actual live `data/paper.db` while the soak was
+polling; it kept running, untouched.
+
+**No dedicated price-history table** (a deliberate scope decision, not
+an oversight): DECISIONS §41 already established that a "usable, nothing
+happened" tick has no row anywhere in the schema, and adding one — write
+churn on every 30-second tick, for a WEEK, for a reporting tool — is not
+this tool's call to make unilaterally against a schema the running soak
+depends on. Instead, the price chart and "current price" are parsed
+straight out of `data/paper-run.log` (an operational convention from how
+the Scheduled Task redirects output, not a schema-enforced path) —
+read-only text parsing, same safety story as the database. `--config` is
+also read (for `limitPrice`, which isn't stored in `paper_positions` at
+all) — a plain `loadConfig` call, no risk, wrapped so a config-load
+failure degrades to "no limit-price reference line" rather than crashing
+the whole report.
+
+**SVG, not a bundled charting library** — the operator offered
+Lightweight Charts as a first choice "if it renders cleanly from a local
+file." Hand-rolled inline SVG was chosen instead: zero dependencies to
+bundle or verify work correctly from `file://` (no CDN, no UMD-build
+inlining, no browser-security edge cases to reason about), full control
+over — and so full confidence in — the coordinate math, and this is
+explicitly "an instrument panel," not a polished product surface. The
+price line is deliberately NOT one continuous polyline: it breaks into
+separate `<polyline>` segments wherever a gap exceeds the same threshold
+`paper_feed_stats` itself uses for a blind streak
+(`stopPollSeconds × 3`) — a single unbroken line across an 18-hour sleep
+would visually claim data that was never observed, exactly the kind of
+plausible-looking-but-wrong number this project has twice now caught
+itself producing by accident (the units bug, the pre-fix positionSize
+bug) and doesn't want a THIRD time, in a chart nobody would think to
+question.
+
+**Pure computation split into `statusPageHelpers.ts` specifically for
+testability** — `statusPage.ts` itself runs top-level side effects the
+instant it's imported (open db, read files, write output), like every
+other CLI entrypoint in this codebase; importing it from a test would
+run all of that. `computeGaps`, `splitIntoSegments`, `fmtDuration`,
+`fmtPct`, `fmtPrice`, `esc` take no db/file dependency and are
+independently tested, including the exact real-world case from this
+soak (a 4h26m gap followed by an 18h48m gap, largest-first ordering,
+zero/negative-duration edge cases, HTML-escaping of log detail text so
+nothing in a stored error message can break the page's structure).

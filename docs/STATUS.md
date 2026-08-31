@@ -5,16 +5,26 @@ conversation history, this tells you where the project stands and what happens
 next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
-## RESUME FROM HERE — end-of-session handoff, 2026-08-30
+## RESUME FROM HERE — end-of-session handoff, 2026-08-31
 
-**The soak is running RIGHT NOW, unattended, overnight, on the operator's
-own machine.** Last checked 2026-08-30T14:05 UTC: a JUP position is open
-(entry 0.002034025462703672, stop-loss 0.001728921643298121, no tranche
-filled yet — still the full original size), feed stats 185 usable / 5
-blind ticks, longest blind streak 33.1 minutes. Commit at handoff:
-**`2a1048a`**, working tree clean, clean-clone verified (420/420 tests,
-typecheck clean, tree-vs-index diff empty) immediately before this note
-was written.
+**The soak is running RIGHT NOW, on the operator's own machine.** Last
+checked 2026-08-31T13:48 UTC: a JUP position is open (entry
+0.002034025462703672, stop-loss 0.001728921643298121, no tranche filled
+yet — still the full original size), feed stats 237 usable / 8 blind
+ticks, longest blind streak 23h 16m. Same process the whole time — the
+Scheduled Task's periodic trigger has never had to relaunch it.
+
+**A read-only status page now exists** — `npm run status:page` reads
+`data/paper.db` and `data/paper-run.log` (read-only, verified — DECISIONS
+§43) and writes `data/status.html` (gitignored, regenerate any time). Use
+this FIRST for a status check before running ad-hoc scripts against the
+db by hand.
+
+Commit at handoff: run `git log -1 --oneline` to confirm — this note is
+updated at the END of a session and the exact hash may already be one or
+two commits behind by the time you read it if more was pushed after.
+Working tree clean and clean-clone verified before every push this
+session (420+ tests, typecheck clean, tree-vs-index diff empty).
 
 ### Do NOT touch — this session or the next one
 
@@ -41,25 +51,19 @@ was written.
 
 ### Next actions, in order
 
-1. **Investigate the 33-minute blind streak's cause — not yet done.**
-   Evidence gathered but not chased down: the log shows a normal tick at
-   `12:12:26.672Z` (feed: 25 ok / 0 blind), then a single `FEED ERROR`
-   at `12:17:55.060Z` ("quote request failed", no further detail — the
-   log only prints the wrapper message, not the underlying cause chain),
-   then **nothing at all for 25.5 minutes** until `12:43:29.228Z`, then
-   three more `FEED ERROR`s about 30s apart, then clean recovery from
-   `12:45:29.782Z` onward (stable ever since, 140+ ticks). The
-   `usable_count`/`error_count` counters climbed continuously through
-   this window rather than resetting — this was the SAME long-lived
-   process throughout, not a restart. **Leading hypothesis, unconfirmed:
-   the machine went to sleep or was otherwise network-unreachable for
-   ~25 minutes**, then took ~90 seconds of failed attempts to reconnect
-   before requests started succeeding again. Worth checking: Windows
-   Event Viewer's power/sleep events around 12:12–12:43 UTC (local time
-   is UTC+7, so ~19:12–19:43 local) to confirm or rule this out. If
-   confirmed, this is a genuine, expected soak finding (a laptop's real
-   sleep behavior interacting with the feed), not a code defect — but it
-   has not been confirmed yet, only hypothesized from the log's shape.
+1. **DONE — the blind-streak cause is confirmed, not just hypothesized.**
+   Both the original 33-minute gap and a much larger overnight one
+   (23h16m, 2026-08-30T18:37:42Z → 2026-08-31T13:26:07Z) were checked
+   against Windows' own `Microsoft-Windows-Kernel-Power`/
+   `Power-Troubleshooter` System event log. **Confirmed: machine sleep
+   (Modern Standby), not a network drop.** The logged sleep/wake
+   timestamps match this project's own log's error/recovery timestamps
+   to within a second or two, both times. This is a genuine, expected
+   soak finding (a laptop's real sleep behavior interacting with the
+   feed, now measured precisely by `paper_feed_stats` and cross-checked
+   against the OS), not a code defect. Nothing to act on unless the
+   operator wants a mitigation (e.g. a power-plan change to prevent
+   sleep) — not decided here.
 2. **Report when the soak's open position hits an exit.** This is the
    "first full cycle" the operator wants to see reviewed. A persistent
    log-tail watch for exit-trigger lines (`TAKE_PROFIT FILLED`,
@@ -520,6 +524,7 @@ JUP/SOL synthesis path are unchanged and remain available as an alternate.
 | Rules | `src/rules/` | phase 1 (preserved, not live): entry conditions, intrabar exits, portfolio limits. Phase 2 (live path, §39): limit entry, ladder exit |
 | Paper | `src/paper/` | Jupiter quote-based price feed (§41 follow-up; pool-candle predecessor removed), fill simulator, SQLite-backed persistence, `tick()` runner — spec step 8 |
 | Execution | `src/execution/` | Phase 3 (§42) — WRITTEN, NOT ENABLED. Wallet, RPC client, gate (LiveExecutionUnlock), Jupiter swap execution + slippage cap, confirmation state machine, balance reconciliation, kill switch, live tick runner — spec step 10 |
+| Status page | `src/cli/statusPage.ts`, `statusPageHelpers.ts` | Read-only static HTML report over `data/paper.db`/`data/paper-run.log` (§43) — `npm run status:page`. Never writes, never touches the soak, no server, no controls. |
 | Backtest | `src/backtest/` | engine (spec §10), summary metrics, regime timeframe alignment |
 | CLI | `src/cli/` | `config:check`, `data:fetch` (`--provider geckoterminal\|binance`), `data:screen` (cheap multi-token coverage/funnel, no backtest — §32), `data:cex-study` (Binance bulk-archive base-rate study + declustering — §33–§35), `data:cex-backtest` (baseline backtest on the CEX-pooled series — §36), `backtest`, `paper` (§41 — polls `positions[]`, simulates fills, persists state) |
 | Hygiene | `test/repo-hygiene.test.ts` | asserts nothing under `src/`/`test/` is gitignored |
@@ -1088,10 +1093,14 @@ zero (see above):
 
 ## Test count convention
 
-Counts are **test cases**, as reported by vitest — never assertions. 420
-cases across 14 files: `data` 91, `rules` 58, `backtest` 57, `paper` 48,
-`filters` 38, `config` 30, `indicators` 23, `execution2` 21, `execution`
-15, `repo-hygiene` 10, `liveRunner` 9, `amount` 8, `logger` 8, `db` 4.
+Counts are **test cases**, as reported by vitest — never assertions. 441
+cases across 15 files: `data` 91, `rules` 58, `backtest` 57, `paper` 48,
+`filters` 38, `config` 30, `indicators` 23, `execution2` 21,
+`statusPageHelpers` 21, `execution` 15, `repo-hygiene` 10, `liveRunner`
+9, `amount` 8, `logger` 8, `db` 4. `statusPageHelpers` (§43) tests the
+read-only status page's pure computation (gap detection, chart-segment
+splitting, duration formatting) plus a real, not just documented, check
+that a `readonly: true` SQLite connection actually throws on write.
 Phase 3 (§42) added `execution`/`execution2` (wallet, gate, swap
 execution, confirmation, balance reconciliation) and `liveRunner` (the
 live tick loop, integration-level, including a genuine end-to-end
