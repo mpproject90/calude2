@@ -5,26 +5,51 @@ conversation history, this tells you where the project stands and what happens
 next. Read `docs/DECISIONS.md` for *why* things are the way they are, and
 `docs/SPEC.md` for the original requirements.
 
-## RESUME FROM HERE — end-of-session handoff, 2026-08-31
+## RESUME FROM HERE — updated 2026-09-05
 
-**The soak is running RIGHT NOW, on the operator's own machine.** Last
-checked 2026-08-31T13:48 UTC: a JUP position is open (entry
-0.002034025462703672, stop-loss 0.001728921643298121, no tranche filled
-yet — still the full original size), feed stats 237 usable / 8 blind
-ticks, longest blind streak 23h 16m. Same process the whole time — the
-Scheduled Task's periodic trigger has never had to relaunch it.
+**The soak's first full entry-to-exit cycle is complete.** JUP entered
+2026-08-30T11:51:11.773Z at 0.002034025462703672 (0.09915 SOL), exited via
+the **TIME exit** on 2026-09-05T04:48:05.705Z at 0.0021287548592489242 —
+**net P&L +0.003758232 SOL (gross +0.004617651 SOL, ~+3.79% net on
+size)**. Neither take-profit tranche nor the trailing stop ever fired;
+the position simply held past its 72-hour (4320-minute) time-exit window
+and closed at whatever price was next observed. No re-entry yet as of
+the last check — the price the bot next saw (~0.002127–0.002130) sits
+above the configured limit (0.00210245), and no cooldown is wired
+(documented, deliberate — DECISIONS §41), so it WILL re-enter
+automatically the moment price drops back below the limit, with no
+further action needed from anyone.
 
-**A read-only status page now exists** — `npm run status:page` reads
+**A real, load-bearing finding, not just a curiosity**: the time exit was
+configured for 72 hours but actually fired after ~4 days 17 hours — a
+**~2 day 17 hour overshoot**, entirely because the host machine was
+asleep/unreachable and the rule can only be evaluated ON A TICK. Feed
+stats show the longest blind streak jumped to **110.7 hours** (~4.6
+days) across this same stretch, all one continuous gap (13 total feed
+errors, still 0 stale). This is genuinely lucky, not evidence the
+mechanism is safe: a STOP-LOSS is exactly as unable to fire during
+downtime as a time exit is — if price had moved sharply against the
+position during those 4.6 days instead of favorably, nothing would have
+protected it either. This is precisely the kind of execution-layer risk
+this soak exists to surface, and is worth weighing explicitly at review,
+independent of this particular trade's positive outcome.
+
+Same process the entire time (one "Paper trading started" banner in the
+log, still) — the Scheduled Task never had to relaunch it, meaning
+whatever caused this multi-day gap did not kill the process (consistent
+with sleep/hibernate, not a crash or reboot — not independently
+re-confirmed against Event Viewer this time, unlike the earlier two
+gaps, since that wasn't asked for).
+
+**A read-only status page exists** — `npm run status:page` reads
 `data/paper.db` and `data/paper-run.log` (read-only, verified — DECISIONS
 §43) and writes `data/status.html` (gitignored, regenerate any time). Use
 this FIRST for a status check before running ad-hoc scripts against the
-db by hand.
+db by hand. Regenerated as of this note.
 
 Commit at handoff: run `git log -1 --oneline` to confirm — this note is
-updated at the END of a session and the exact hash may already be one or
-two commits behind by the time you read it if more was pushed after.
-Working tree clean and clean-clone verified before every push this
-session (420+ tests, typecheck clean, tree-vs-index diff empty).
+updated at the end of a session/check-in and the exact hash may already
+be one or two commits ahead by the time you read it.
 
 ### Do NOT touch — this session or the next one
 
@@ -33,53 +58,44 @@ session (420+ tests, typecheck clean, tree-vs-index diff empty).
   `Unregister-ScheduledTask`. Checking its status (`Get-ScheduledTask`)
   and tailing the log are fine; stopping or restarting it is not, unless
   the operator explicitly asks for the deliberate restart test (still
-  outstanding, see below) or the position has closed and a fresh soak is
-  being deliberately started.
+  outstanding, see below).
 - **`data/paper.db`, `data/paper-run.log`.** The running soak owns these.
-  Reading them (a fresh script, a `SELECT`) is fine; writing, deleting, or
-  wiping them is not.
-- **`config/default.yaml`.** This is the soak's active config — the open
-  position was entered against it. Do not edit it while a position is
-  open against it.
+  Reading them (a fresh script, a `SELECT`, `npm run status:page`) is
+  fine; writing, deleting, or wiping them is not.
+- **`config/default.yaml`.** The soak's active config. No position is
+  open against it right now, but it may re-enter at any tick (no
+  cooldown wired) — don't edit it without checking current state first.
 - **Phase 3 — anything that unlocks it.** `src/execution/` and
   `src/cli/live.ts` are built and tested but must stay OFF: do not set
   `LIVE_TRADING=true`, do not type the confirmation phrase, do not run
   `npm run live` against a funded wallet or `mode: live`. Stays disabled
   until the phase 2 soak is reviewed and the operator explicitly
-  approves — CLAUDE.md's hard rule, unchanged by anything built this
-  session.
+  approves — CLAUDE.md's hard rule.
 
 ### Next actions, in order
 
-1. **DONE — the blind-streak cause is confirmed, not just hypothesized.**
-   Both the original 33-minute gap and a much larger overnight one
-   (23h16m, 2026-08-30T18:37:42Z → 2026-08-31T13:26:07Z) were checked
-   against Windows' own `Microsoft-Windows-Kernel-Power`/
-   `Power-Troubleshooter` System event log. **Confirmed: machine sleep
-   (Modern Standby), not a network drop.** The logged sleep/wake
-   timestamps match this project's own log's error/recovery timestamps
-   to within a second or two, both times. This is a genuine, expected
-   soak finding (a laptop's real sleep behavior interacting with the
-   feed, now measured precisely by `paper_feed_stats` and cross-checked
-   against the OS), not a code defect. Nothing to act on unless the
-   operator wants a mitigation (e.g. a power-plan change to prevent
-   sleep) — not decided here.
-2. **Report when the soak's open position hits an exit.** This is the
-   "first full cycle" the operator wants to see reviewed. A persistent
-   log-tail watch for exit-trigger lines (`TAKE_PROFIT FILLED`,
-   `TRAILING FILLED`, `STOP_LOSS FILLED`, `TIME FILLED`) was armed during
-   the session that built the execution layer — if this is a genuinely
-   fresh session with no memory of that conversation, the watch does not
-   carry over automatically; re-arm one against `data/paper-run.log` if
-   the operator asks for it, or just check the log/db directly when
-   asked for a status update.
-3. **The deliberate mid-soak restart test is still outstanding** (from
+1. **DONE — the blind-streak cause behind the first two gaps is
+   confirmed** (33min and 23h16m, both 2026-08-30/31): checked against
+   Windows' own `Microsoft-Windows-Kernel-Power`/`Power-Troubleshooter`
+   System event log, confirmed machine sleep (Modern Standby), not a
+   network drop, timestamps matching to within a second or two both
+   times. The THIRD, much larger gap (110.7h, culminating in the time
+   exit above) has NOT been separately re-confirmed against Event
+   Viewer — same likely cause, not independently verified this time.
+2. **DONE — first full cycle reported** (this note, and the push
+   notification sent when the exit fired). Time exit, net +0.003758232
+   SOL, ~4d17h overshoot past the configured 72h — see above.
+3. **Consider, at review: does a wall-clock time exit need a
+   downtime-aware design?** Not decided, not this session's call — the
+   overshoot above is a real, now-quantified execution-layer property
+   worth weighing when phase 2 is reviewed, independent of whether THIS
+   trade happened to end up positive.
+4. **The deliberate mid-soak restart test is still outstanding** (from
    the operator's original soak requirements) — kill the tracked process
    fully (recursively — DECISIONS §41's "process-tree caveat" explains
    why a partial kill looks like success but isn't) and confirm the
    periodic self-heal trigger relaunches it with state intact. Not done
-   yet; do this only when explicitly asked, not proactively, since it
-   requires deliberately interrupting the running soak.
+   yet; do this only when explicitly asked, not proactively.
 
 **Branch:** `main` is the working branch and the repository default. Clone it and
 you have everything.
